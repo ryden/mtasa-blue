@@ -25,7 +25,7 @@ namespace SharedUtil
     SString GetSystemRegistryValue ( uint hKey, const SString& strPath, const SString& strName );
 
     // Get/set registry values for the current version
-    void SetRegistryValue ( const SString& strPath, const SString& strName, const SString& strValue );
+    void SetRegistryValue ( const SString& strPath, const SString& strName, const SString& strValue, bool bFlush = false );
     SString GetRegistryValue ( const SString& strPath, const SString& strName );
     bool RemoveRegistryKey ( const SString& strPath );
 
@@ -36,10 +36,6 @@ namespace SharedUtil
     // Get/set registry values for all versions (Common)
     void SetCommonRegistryValue ( const SString& strPath, const SString& strName, const SString& strValue );
     SString GetCommonRegistryValue ( const SString& strPath, const SString& strName );
-
-    // Get/set registry values for particular version using the old (HKCU) layout
-    void SetVersionRegistryValueLegacy ( const SString& strVersion, const SString& strPath, const SString& strName, const SString& strValue );
-    SString GetVersionRegistryValueLegacy ( const SString& strVersion, const SString& strPath, const SString& strName );
 
 
     bool ShellExecuteBlocking ( const SString& strAction, const SString& strFile, const SString& strParameters = "", const SString& strDirectory = "", int nShowCmd = 1 );
@@ -80,9 +76,16 @@ namespace SharedUtil
     bool GetOnRestartCommand ( SString& strOperation, SString& strFile, SString& strParameters, SString& strDirectory, SString& strShowCmd );
 
     //
+    // What server to connect to after update
+    //
+    void            SetPostUpdateConnect            ( const SString& strHost );
+    SString         GetPostUpdateConnect            ( void );
+
+    //
     // For tracking results of new features
     //
-    void            AddReportLog                    ( uint uiId, const SString& strText, uint uiAmountLimit = UINT_MAX );
+    void            AddReportLog                    ( uint uiId, const SString& strText, uint uiAmountLimit = 0 );
+    void            AddExceptionReportLog           ( uint uiId, const char* szExceptionName, const char* szExceptionText );
     void            SetReportLogContents            ( const SString& strText );
     SString         GetReportLogContents            ( void );
     SString         GetReportLogProcessTag          ( void );
@@ -115,6 +118,14 @@ namespace SharedUtil
     void            WatchDogSetUncleanStop          ( bool bOn );
     bool            WatchDogWasLastRunCrash         ( void );
     void            WatchDogSetLastRunCrash         ( bool bOn );
+    void            WatchDogUserDidInteractWithMenu ( void );
+
+    void            SetProductRegistryPath          ( const SString& strRegistryPath );
+    const SString&  GetProductRegistryPath          ( void );
+    void            SetProductCommonDataDir         ( const SString& strCommonDataDir );
+    const SString&  GetProductCommonDataDir         ( void );
+    void            SetProductVersion               ( const SString& strVersion );
+    const SString&  GetProductVersion               ( void );
 
     // BrowseToSolution flags
     enum
@@ -125,7 +136,12 @@ namespace SharedUtil
         TERMINATE_IF_NO         = 8,        //    ''
         TERMINATE_IF_YES_OR_NO  = TERMINATE_IF_YES | TERMINATE_IF_NO,
         TERMINATE_PROCESS       = TERMINATE_IF_YES_OR_NO,
-        SHOW_MESSAGE_ONLY       = 16,        // Just show message without going online
+        ICON_ERROR              = 0x10,     // MB_ICONERROR
+        ICON_QUESTION           = 0x20,     // MB_ICONQUESTION
+        ICON_WARNING            = 0x30,     // MB_ICONWARNING
+        ICON_INFO               = 0x40,     // MB_ICONINFORMATION
+        ICON_MASK_VALUE         = ICON_ERROR | ICON_QUESTION | ICON_WARNING | ICON_INFO,
+        SHOW_MESSAGE_ONLY       = 0x80,     // Just show message without going online
     };
     void            BrowseToSolution                ( const SString& strType, int uiFlags = 0, const SString& strMessageBoxMessage = "", const SString& strErrorCode = "" );
     bool            ProcessPendingBrowseToSolution  ( void );
@@ -133,6 +149,13 @@ namespace SharedUtil
 
     SString         GetSystemErrorMessage           ( uint uiErrorCode, bool bRemoveNewlines = true, bool bPrependCode = true );
     void            SetClipboardText                ( const SString& strText );
+
+    // Version checks
+    bool            IsWindowsVersionOrGreater       ( WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor );
+    bool            IsWindowsXPSP3OrGreater         ( void );
+    bool            IsWindowsVistaOrGreater         ( void );
+    bool            IsWindows7OrGreater             ( void );
+    bool            IsWindows8OrGreater             ( void );
 
 #endif
 
@@ -176,7 +199,6 @@ namespace SharedUtil
     // Version string things
     bool        IsValidVersionString                ( const SString& strVersion );
     SString     ExtractVersionStringBuildNumber     ( const SString& strVersion );
-    SString     ConformVersionStringToBaseVersion   ( const SString& strVersion, const SString& strBaseVersion );
 
     //
     // Try to make a path relative to the 'resources/' directory
@@ -199,23 +221,11 @@ namespace SharedUtil
 
     // Buffer identification
     bool IsLuaCompiledScript( const void* pData, uint uiLength );
-    bool IsLuaEncryptedScript( const void* pData, uint uiLength );
+    bool IsLuaObfuscatedScript( const void* pData, uint uiLength );
 
     //
     // Some templates
     //
-    template < class T >
-    T Min ( const T& a, const T& b )
-    {
-        return a < b ? a : b;
-    }
-
-    template < class T >
-    T Max ( const T& a, const T& b )
-    {
-        return a > b ? a : b;
-    }
-
     // Clamps a value between two other values ( min < a < max )
     template < class T >
     T Clamp ( const T& min, const T& a, const T& max )
@@ -621,8 +631,8 @@ namespace SharedUtil
             if ( m_Queue.size () > 0 )
             {
                 T ID = m_Queue.back();
-                m_Queue.pop_back ();
                 dest = ID;
+                m_Queue.pop_back ();
                 return true;
             }
 
@@ -1279,11 +1289,12 @@ namespace SharedUtil
     //
     enum eDummy { };
 
+    template<class T>
     struct CEnumInfo
     {
         struct SEnumItem
         {
-            int iValue;
+            T iValue;
             const char* szName;
         };
 
@@ -1337,16 +1348,17 @@ namespace SharedUtil
     };
 
 
-    #define DECLARE_ENUM( T ) \
-        CEnumInfo*             GetEnumInfo     ( const T& ); \
+    #define DECLARE_ENUM2(T, U) \
+        CEnumInfo<U>*          GetEnumInfo     ( const T& ); \
         inline const SString&  EnumToString    ( const T& value )                           { return GetEnumInfo ( *(T*)0 )->FindName    ( (eDummy)value ); }\
         inline bool            StringToEnum    ( const SString& strName, T& outResult )     { return GetEnumInfo ( *(T*)0 )->FindValue   ( strName, (eDummy&)outResult ); }\
         inline const SString&  GetEnumTypeName ( const T& )                                 { return GetEnumInfo ( *(T*)0 )->GetTypeName (); }\
         inline bool            EnumValueValid  ( const T& value )                           { return GetEnumInfo ( *(T*)0 )->ValueValid  ( (eDummy)value ); }\
 
-    #define IMPLEMENT_ENUM_BEGIN(cls) \
-        CEnumInfo* GetEnumInfo( const cls& ) \
+    #define IMPLEMENT_ENUM_BEGIN2(T, U) \
+        CEnumInfo<U>* GetEnumInfo( const T& ) \
         { \
+            using CEnumInfo = CEnumInfo<U>; \
             static const CEnumInfo::SEnumItem items[] = {
 
     #define IMPLEMENT_ENUM_END(name) \
@@ -1360,6 +1372,16 @@ namespace SharedUtil
 
     #define ADD_ENUM(value,name) {value, name},
     #define ADD_ENUM1(value)     {value, #value},
+
+    // enum
+    #define DECLARE_ENUM(T)                                             DECLARE_ENUM2(T, int)
+    #define IMPLEMENT_ENUM_BEGIN(T)                                     IMPLEMENT_ENUM_BEGIN2(T, int)
+
+    // enum class
+    #define DECLARE_ENUM_CLASS(T)                                       DECLARE_ENUM2(T, T)
+    #define IMPLEMENT_ENUM_CLASS_BEGIN(T)                               IMPLEMENT_ENUM_BEGIN2(T, T)
+    #define IMPLEMENT_ENUM_CLASS_END(name)                              IMPLEMENT_ENUM_END(name)
+    #define IMPLEMENT_ENUM_CLASS_END_DEFAULTS(name,defvalue,defname)    IMPLEMENT_ENUM_END_DEFAULTS(name,defvalue,defname)
 
 
     //
@@ -1441,6 +1463,37 @@ namespace SharedUtil
         wild++;
       }
       return !*wild;
+    }
+
+
+    ///////////////////////////////////////////////////////////////
+    //
+    // ReadTokenSeparatedList
+    //
+    // Split token separated values into an array.
+    // Removes leading/trailing spaces and empty items
+    //
+    ///////////////////////////////////////////////////////////////
+    inline
+    void ReadTokenSeparatedList(const SString& strDelim, const SString& strInput, std::vector<SString>& outList)
+    {
+        strInput.Split(strDelim, outList);
+        // Remove surrounding spaces for each item
+        for ( auto iter = outList.begin(); iter != outList.end(); )
+        {
+            SString& strItem = *iter;
+            strItem = strItem.TrimEnd(" ").TrimStart(" ");
+            if ( strItem.empty() )
+                iter = outList.erase(iter);
+            else
+                ++iter;
+        }
+    }
+
+    inline
+    void ReadCommaSeparatedList(const SString& strInput, std::vector<SString>& outList)
+    {
+        return ReadTokenSeparatedList(",", strInput, outList);
     }
 
 

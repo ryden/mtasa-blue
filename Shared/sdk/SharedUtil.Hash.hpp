@@ -12,6 +12,16 @@
 
 #include "sha1.hpp"
 #include "sha2.hpp"
+#include <random>
+#include <algorithm>
+
+namespace bcrypt
+{
+    extern "C"
+    {
+        #include <bcrypt/ow-crypt.h>
+    }
+}
 
 namespace SharedUtil
 {
@@ -46,7 +56,7 @@ namespace SharedUtil
     {
         //CRYPT_START
         // Try to load the file
-        FILE* pFile = fopen ( szFilename, "rb" );
+        FILE* pFile = File::Fopen ( szFilename, "rb" );
         if ( pFile )
         {
             // Init
@@ -216,7 +226,13 @@ namespace SharedUtil
       // Zeroize sensitive information
       memset ( m_buffer, 0, sizeof (m_buffer) );
     }
-    
+
+
+    const unsigned char* CMD5Hasher::GetResult ( void ) const
+    {
+        return m_digest;
+    }
+
     
     void CMD5Hasher::Transform ( unsigned char block [64] )
     {
@@ -398,9 +414,9 @@ namespace SharedUtil
 
     unsigned int HashString ( const char* szString, unsigned int length )
     {
-        register const char* k;             //< pointer to the string data to be hashed
-        register unsigned int a, b, c;      //< temporary variables
-        register unsigned int len;          //< length of the string left
+        const char* k;             //< pointer to the string data to be hashed
+        unsigned int a, b, c;      //< temporary variables
+        unsigned int len;          //< length of the string left
 
         k = szString;
         len = length;
@@ -473,6 +489,44 @@ namespace SharedUtil
         return c;
     }
 
+#ifdef SDK_WITH_BCRYPT
+    constexpr const std::size_t HashBufferSize = 60 + 1;
+	SString BcryptHash(const SString& password, SString salt, std::size_t cost)
+	{
+        if (salt.empty())
+        {
+            std::random_device random;
+            std::mt19937 generator(random());
+
+            char saltBuffer[32];
+            std::generate_n(saltBuffer, sizeof(saltBuffer), generator);
+
+            char saltBase64Buffer[30];
+            bcrypt::crypt_gensalt_rn("$2y$", cost, saltBuffer, sizeof(saltBuffer), saltBase64Buffer, sizeof(saltBase64Buffer));
+            salt = SStringX(saltBase64Buffer);
+        }
+        else
+        {
+            salt = SString("$2y$%02u$%s", cost, salt.substr(0, 22).c_str());
+        }
+
+        if (salt.size() != 29)
+            return "";
+
+        char hashBuffer[HashBufferSize];
+        bcrypt::crypt_rn(password.c_str(), salt.c_str(), hashBuffer, sizeof(hashBuffer));
+
+        return SStringX(hashBuffer);
+	}
+
+	bool BcryptVerify(const SString& password, const SString& hash)
+	{
+        char checkedHashBuffer[HashBufferSize];
+        bcrypt::crypt_rn(password.c_str(), hash.c_str(), checkedHashBuffer, sizeof(checkedHashBuffer));
+
+        return strcmp(checkedHashBuffer, hash.c_str()) == 0;
+	}
+#endif
 
     SString ConvertDataToHexString( const void* pData, uint uiLength )
     {
@@ -491,7 +545,7 @@ namespace SharedUtil
     void ConvertHexStringToData( const SString& strString, void* pOutData, uint uiLength )
     {
         memset( pOutData, 0, uiLength );
-        uint uiNibbleAmount = Min < uint > ( uiLength * 2, strString.length() );
+        uint uiNibbleAmount = std::min < uint > ( uiLength * 2, strString.length() );
         uchar* pOutput = (uchar*)pOutData;
         for ( uint i = 0; i < uiNibbleAmount; i++ )
         {
@@ -523,6 +577,10 @@ namespace SharedUtil
         return GenerateHashHexString( EHashFunction::SHA256, strData );
     }
 
+    SString GenerateSha256HexStringFromFile( const SString& strFilename )
+    {
+        return GenerateHashHexStringFromFile( EHashFunction::SHA256, strFilename );
+    }
 
     SString GenerateHashHexString( EHashFunctionType hashFunction, const void* pData, uint uiLength )
     {
@@ -573,9 +631,98 @@ namespace SharedUtil
         return GenerateHashHexString( hashFunction, *strData, strData.length() );
     }
 
+    SString GenerateHashHexStringFromFile( EHashFunctionType hashFunction, FILE* fh, uint uiMaxSize, int iOffset )
+    {
+        unsigned char buf[ 32768 ];
+
+        // Set offset
+        fseek ( fh, iOffset, SEEK_SET );
+
+        switch( hashFunction )
+        {
+            case EHashFunction::MD5:
+            {
+                CMD5Hasher Hasher;
+                Hasher.Init();
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    Hasher.Update( buf, n );
+                Hasher.Finalize();
+                return ConvertDataToHexString( Hasher.GetResult(), 16 );
+            }
+            case EHashFunction::SHA1:
+            {
+                sha1_context ctx;
+                sha1_init( &ctx );
+                sha1_starts( &ctx );
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    sha1_update( &ctx, buf, n );
+                uchar output[20];
+                sha1_finish( &ctx, output );
+                sha1_free( &ctx );
+                return ConvertDataToHexString( output, sizeof( output ) );
+            }
+            case EHashFunction::SHA224:
+            {
+                sha224_ctx ctx;
+                sha224_init( &ctx );
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    sha224_update( &ctx, buf, n );
+                uchar output[ SHA224_DIGEST_SIZE ];
+                sha224_final( &ctx, output );
+                return ConvertDataToHexString( output, sizeof( output ) );
+            }
+            case EHashFunction::SHA256:
+            {
+                sha256_ctx ctx;
+                sha256_init(&ctx);
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    sha256_update( &ctx, buf, n );
+                uchar output[ SHA256_DIGEST_SIZE ];
+                sha256_final(&ctx, output);
+                return ConvertDataToHexString( output, sizeof( output ) );
+            }
+            case EHashFunction::SHA384:
+            {
+                sha384_ctx ctx;
+                sha384_init(&ctx);
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    sha384_update( &ctx, buf, n );
+                uchar output[ SHA384_DIGEST_SIZE ];
+                sha384_final(&ctx, output);
+                return ConvertDataToHexString( output, sizeof( output ) );
+            }
+            case EHashFunction::SHA512:
+            {
+                sha512_ctx ctx;
+                sha512_init(&ctx);
+                for( size_t n ; ( n = fread( buf, 1, std::min < uint > ( sizeof( buf ), uiMaxSize ), fh ) ) > 0 ; uiMaxSize -= n )
+                    sha512_update( &ctx, buf, n );
+                uchar output[ SHA512_DIGEST_SIZE ];
+                sha512_final(&ctx, output);
+                return ConvertDataToHexString( output, sizeof( output ) );
+            }
+            default:
+                break;
+        };
+        return "";
+    }
+
+    SString GenerateHashHexStringFromFile( EHashFunctionType hashFunction, const SString& strFilename, int iMaxSize, int iOffset )
+    {
+        FILE* fh = File::Fopen( strFilename, "rb" );
+        if ( fh )
+        {
+            SString strResult = GenerateHashHexStringFromFile( hashFunction, fh, iMaxSize, iOffset );
+            fclose( fh );
+            return strResult;
+        }
+        else
+            return GenerateHashHexString( hashFunction, NULL, 0 );
+    }
+
     void encodeXtea(unsigned int* v, unsigned int* w, unsigned int* k) {
-        register unsigned int v0=v[0], v1=v[1], i, sum=0;
-        register unsigned int delta=0x9E3779B9;
+        unsigned int v0=v[0], v1=v[1], i, sum=0;
+        unsigned int delta=0x9E3779B9;
         for(i=0; i<32; i++) {
            v0 += (((v1 << 4) ^ (v1 >> 5)) + v1) ^ (sum + k[sum & 3]);
             sum += delta;
@@ -585,8 +732,8 @@ namespace SharedUtil
     }
      
     void decodeXtea(unsigned int* v, unsigned int* w, unsigned int* k) {
-        register unsigned int v0=v[0], v1=v[1], i, sum=0xC6EF3720;
-        register unsigned int delta=0x9E3779B9;
+        unsigned int v0=v[0], v1=v[1], i, sum=0xC6EF3720;
+        unsigned int delta=0x9E3779B9;
         for(i=0; i<32; i++) {
             v1 -= (((v0 << 4) ^ (v0 >> 5)) + v0) ^ (sum + k[(sum>>11) & 3]);
             sum -= delta;

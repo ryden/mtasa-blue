@@ -127,9 +127,7 @@ bool SharedUtil::QueryWMI ( SQueryWMIResult& outResult, const SString& strQuery,
  
     if (FAILED(hres))
     {
-#if MTA_DEBUG
-        OutputDebugLine ( SString ( "[Error] QueryWMI - Failed to create IWbemLocator object. Error code = %x", hres ) );
-#endif
+        AddReportLog( 9130, SString ( "QueryWMI - Failed to create IWbemLocator object. Error code = %x (%s)", hres, *strQuery ) );
         return false;
     }
 
@@ -156,7 +154,7 @@ bool SharedUtil::QueryWMI ( SQueryWMIResult& outResult, const SString& strQuery,
     if (FAILED(hres))
     {
         pLoc->Release();     
-        OutputDebugLine ( SString ( "[Error] QueryWMI - Could not connect. Error code = %x", hres ) );
+        AddReportLog( 9135, SString ( "QueryWMI - Could not connect. Error code = %x (%s)", hres, *strQuery ) );
         return false;
     }
 
@@ -178,7 +176,7 @@ bool SharedUtil::QueryWMI ( SQueryWMIResult& outResult, const SString& strQuery,
     {
         pSvc->Release();
         pLoc->Release();     
-        OutputDebugLine ( SString ( "[Error] QueryWMI - Could not set proxy blanket. Error code = %x", hres ) );
+        AddReportLog( 9136, SString ( "QueryWMI - Could not set proxy blanket. Error code = %x (%s)", hres, *strQuery ) );
         return false;
     }
 
@@ -196,7 +194,7 @@ bool SharedUtil::QueryWMI ( SQueryWMIResult& outResult, const SString& strQuery,
     {
         pSvc->Release();
         pLoc->Release();
-        OutputDebugLine ( SString ( "[Error] QueryWMI - Query failed. Error code = %x", hres ) );
+        AddReportLog( 9137, SString ( "QueryWMI - Query failed. Error code = %x (%s)", hres, *strQuery ) );
         return false;
     }
 
@@ -397,7 +395,7 @@ long long SharedUtil::GetWMIVideoAdapterMemorySize ( const SString& strDisplay )
                 llResult = llAdapterRAM;
 
             if ( iAvailability == 3 )
-                llResult = Max ( llResult, llAdapterRAM );
+                llResult = std::max ( llResult, llAdapterRAM );
 
             if ( llAdapterRAM != 0 )
                 if ( PNPDeviceID.BeginsWithI ( strDeviceId ) )
@@ -517,4 +515,43 @@ bool SharedUtil::GetLibVersionInfo( const SString& strLibName, SLibVersionInfo* 
     return FALSE;
 }
 
-#endif
+
+///////////////////////////////////////////////////////////////
+//
+// Is64BitOS
+//
+// Return true if is Windows 64 bit OS
+//
+///////////////////////////////////////////////////////////////
+bool SharedUtil::Is64BitOS( void )
+{
+    typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
+    static LPFN_ISWOW64PROCESS fnIsWow64Process = NULL;
+    static bool bDoneGetProcAddress = false;
+    static bool bIs64BitOS = false;
+
+    if ( !bDoneGetProcAddress )
+    {
+        // Find 'IsWow64Process'
+        bDoneGetProcAddress = true;
+        HMODULE hModule = GetModuleHandle( "Kernel32.dll" );
+        fnIsWow64Process = static_cast < LPFN_ISWOW64PROCESS > ( static_cast < PVOID > ( GetProcAddress( hModule, "IsWow64Process" ) ) );
+
+        if ( fnIsWow64Process )
+        {
+            // We know current process is 32 bit. See if it is running under WOW64
+            BOOL bIsWow64 = FALSE;
+            BOOL bOk = fnIsWow64Process( GetCurrentProcess(), &bIsWow64 );
+            if ( bOk )
+            {
+                // Must be 64bit O/S if current (32 bit) process is running under WOW64
+                if ( bIsWow64 )
+                    bIs64BitOS = true;
+            }
+        }
+    }
+
+    return bIs64BitOS;
+}
+
+#endif  // MTA_CLIENT

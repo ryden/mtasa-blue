@@ -6,6 +6,7 @@
 *  PURPOSE:     Client/server shared enum definitions
 *
 *****************************************************************************/
+#pragma once
 
 namespace EEventPriority
 {
@@ -63,4 +64,6 @@ enum eEulerRotationOrder
 DECLARE_ENUM( eEulerRotationOrder );
 
 DECLARE_ENUM( EHashFunction::EHashFunctionType );
+DECLARE_ENUM_CLASS(PasswordHashFunction);
+
 DECLARE_ENUM( ePacketID );

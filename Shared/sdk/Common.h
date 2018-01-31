@@ -30,9 +30,9 @@
 #define MAX_SERVER_ELEMENTS 131072
 #define MAX_CLIENT_ELEMENTS 131072
 
-#if (MAX_SERVER_ELEMENTS&(MAX_SERVER_ELEMENTS-1)) != 0
-    #error MAX_SERVER_ELEMENTS "Macro must be power of 2"
-#endif
+// Make sure MAX_SERVER_ELEMENTS are a power of two
+static_assert( ( MAX_SERVER_ELEMENTS&( MAX_SERVER_ELEMENTS - 1 ) ) == 0, "MAX_SERVER_ELEMENTS must be a power of 2" );
+
 
 // ElementID structure
 struct ElementID
@@ -74,13 +74,6 @@ private:
 // Defines the min/max size for the player nick for use in the core module
 #define MIN_PLAYER_NICK_LENGTH          1
 #define MAX_PLAYER_NICK_LENGTH          22
-
-// Windows Specific stuff
-#ifdef WIN32
-#define _DECLSPEC_EX extern "C" _declspec(dllexport) 
-#else
-#define _DECLSPEC_EX extern "C" 
-#endif
 
 // Maximum number of players that can be packed in a single lightweight puresync packet
 #define LIGHTSYNC_MAX_PLAYERS               32

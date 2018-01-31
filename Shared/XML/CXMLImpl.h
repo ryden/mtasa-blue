@@ -19,9 +19,9 @@ class CXMLImpl : public CXML
 {
 public:
                         CXMLImpl            ( void );
-                        ~CXMLImpl           ( void );
+    virtual             ~CXMLImpl           ( void );
 
-    CXMLFile*           CreateXML           ( const char* szFilename, bool bUseIDs );
+    CXMLFile*           CreateXML           ( const char* szFilename, bool bUseIDs, bool bReadOnly );
     void                DeleteXML           ( CXMLFile* pFile );
 
     CXMLNode*           CreateDummyNode     ( void );

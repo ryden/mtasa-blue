@@ -43,20 +43,20 @@
 #include <cxxabi.h>
 #endif
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include <algorithm>
-#include <tr1/unordered_set>
 #include <utility>
 
 #include "common/dwarf_line_to_module.h"
+#include "common/unordered.h"
 
 namespace google_breakpad {
 
 using std::map;
 using std::pair;
 using std::sort;
-using std::tr1::unordered_set;
 using std::vector;
 
 // Data provided by a DWARF specification DIE.
@@ -141,7 +141,7 @@ DwarfCUToModule::FileContext::~FileContext() {
 }
 
 void DwarfCUToModule::FileContext::AddSectionToSectionMap(
-    const string& name, const char* contents, uint64 length) {
+    const string& name, const uint8_t *contents, uint64 length) {
   section_map_[name] = std::make_pair(contents, length);
 }
 
@@ -352,9 +352,15 @@ void DwarfCUToModule::GenericDIEHandler::ProcessAttributeString(
       break;
     case dwarf2reader::DW_AT_MIPS_linkage_name: {
       char* demangled = NULL;
-#if !defined(__ANDROID__)
-      demangled = abi::__cxa_demangle(data.c_str(), NULL, NULL, NULL);
+      int status = -1;
+#if !defined(__ANDROID__)  // Android NDK doesn't provide abi::__cxa_demangle.
+      demangled = abi::__cxa_demangle(data.c_str(), NULL, NULL, &status);
 #endif
+      if (status != 0) {
+        cu_context_->reporter->DemangleError(data, status);
+        demangled_name_ = "";
+        break;
+      }
       if (demangled) {
         demangled_name_ = AddStringToPool(demangled);
         free(reinterpret_cast<void*>(demangled));
@@ -378,17 +384,17 @@ string DwarfCUToModule::GenericDIEHandler::ComputeQualifiedName() {
     qualified_name = &specification_->qualified_name;
   }
 
-  const string *unqualified_name;
+  const string *unqualified_name = NULL;
   const string *enclosing_name;
   if (!qualified_name) {
-    // Find our unqualified name. If the DIE has its own DW_AT_name
-    // attribute, then use that; otherwise, check our specification.
-    if (name_attribute_.empty() && specification_)
-      unqualified_name = &specification_->unqualified_name;
-    else
+    // Find the unqualified name. If the DIE has its own DW_AT_name
+    // attribute, then use that; otherwise, check the specification.
+    if (!name_attribute_.empty())
       unqualified_name = &name_attribute_;
+    else if (specification_)
+      unqualified_name = &specification_->unqualified_name;
 
-    // Find the name of our enclosing context. If we have a
+    // Find the name of the enclosing context. If this DIE has a
     // specification, it's the specification's enclosing context that
     // counts; otherwise, use this DIE's context.
     if (specification_)
@@ -397,9 +403,22 @@ string DwarfCUToModule::GenericDIEHandler::ComputeQualifiedName() {
       enclosing_name = &parent_context_->name;
   }
 
+  // Prepare the return value before upcoming mutations possibly invalidate the
+  // existing pointers.
+  string return_value;
+  if (qualified_name) {
+    return_value = *qualified_name;
+  } else if (unqualified_name && enclosing_name) {
+    // Combine the enclosing name and unqualified name to produce our
+    // own fully-qualified name.
+    return_value = cu_context_->language->MakeQualifiedName(*enclosing_name,
+                                                            *unqualified_name);
+  }
+
   // If this DIE was marked as a declaration, record its names in the
   // specification table.
-  if (declaration_) {
+  if ((declaration_ && qualified_name) ||
+      (unqualified_name && enclosing_name)) {
     Specification spec;
     if (qualified_name) {
       spec.qualified_name = *qualified_name;
@@ -410,13 +429,7 @@ string DwarfCUToModule::GenericDIEHandler::ComputeQualifiedName() {
     cu_context_->file_context->file_private_->specifications[offset_] = spec;
   }
 
-  if (qualified_name)
-    return *qualified_name;
-
-  // Combine the enclosing name and unqualified name to produce our
-  // own fully-qualified name.
-  return cu_context_->language->MakeQualifiedName(*enclosing_name,
-                                                  *unqualified_name);
+  return return_value;
 }
 
 // A handler class for DW_TAG_subprogram DIEs.
@@ -529,18 +542,19 @@ void DwarfCUToModule::FuncHandler::Finish() {
   // functions that were never used), but all the ones we're
   // interested in cover a non-empty range of bytes.
   if (low_pc_ < high_pc_) {
-    // Create a Module::Function based on the data we've gathered, and
-    // add it to the functions_ list.
-    scoped_ptr<Module::Function> func(new Module::Function);
     // Malformed DWARF may omit the name, but all Module::Functions must
     // have names.
+    string name;
     if (!name_.empty()) {
-      func->name = name_;
+      name = name_;
     } else {
       cu_context_->reporter->UnnamedFunction(offset_);
-      func->name = "<name omitted>";
+      name = "<name omitted>";
     }
-    func->address = low_pc_;
+
+    // Create a Module::Function based on the data we've gathered, and
+    // add it to the functions_ list.
+    scoped_ptr<Module::Function> func(new Module::Function(name, low_pc_));
     func->size = high_pc_ - low_pc_;
     func->parameter_size = 0;
     if (func->address) {
@@ -660,6 +674,13 @@ void DwarfCUToModule::WarningReporter::UnnamedFunction(uint64 offset) {
   CUHeading();
   fprintf(stderr, "%s: warning: function at offset 0x%llx has no name\n",
           filename_.c_str(), offset);
+}
+
+void DwarfCUToModule::WarningReporter::DemangleError(
+    const string &input, int error) {
+  CUHeading();
+  fprintf(stderr, "%s: warning: failed to demangle %s with error %d\n",
+          filename_.c_str(), input.c_str(), error);
 }
 
 void DwarfCUToModule::WarningReporter::UnhandledInterCUReference(
@@ -795,7 +816,7 @@ void DwarfCUToModule::ReadSourceLines(uint64 offset) {
     cu_context_->reporter->MissingSection(".debug_line");
     return;
   }
-  const char *section_start = map_entry->second.first;
+  const uint8_t *section_start = map_entry->second.first;
   uint64 section_length = map_entry->second.second;
   if (offset >= section_length) {
     cu_context_->reporter->BadLineInfoOffset(offset);

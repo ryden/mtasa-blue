@@ -12,7 +12,7 @@
 
 #include "CEasingCurve.h"
 
-#include "EasingEquations.cpp" //Included from cpp to separate just visually maths equations from framework
+#include "EasingEquations.hpp" //Included from cpp to separate just visually maths equations from framework
 
 //For easing functions that require more parameters than time (like amplitude, period, overshot)
 class CComplexEasingFunction
@@ -32,7 +32,8 @@ public: //All public since it's only an internal class
         m_fPeriod ( period ),
         m_fOvershoot ( overshoot)
     { }
-    
+    virtual ~CComplexEasingFunction( void ) {}
+
     virtual double valueForProgress ( double a_fProgress ) const = 0;
     
     eType   m_eType;

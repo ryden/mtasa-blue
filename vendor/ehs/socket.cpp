@@ -42,6 +42,7 @@ Zac Hansen ( xaxxon@slackworks.com )
 #endif
 #endif // sun
 
+
 #include "socket.h"
 
 #ifndef _WIN32
@@ -50,12 +51,12 @@ Zac Hansen ( xaxxon@slackworks.com )
 #include <sys/ioctl.h>
 #endif
 #include <assert.h>
+#include "stats.h"
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0 // no support
 #endif // MSG_NOSIGNAL
 
-extern long long ms_HttpTotalBytesSent;
 
 Socket::Socket ( int inAcceptSocket,
 				 sockaddr_in * ipoInternetSocketAddress )
@@ -203,7 +204,7 @@ int Socket::Read ( void * ipBuffer, int ipBufferLength )
 
 int Socket::Send ( const void * ipMessage, size_t inLength, int inFlags )
 {
-    ms_HttpTotalBytesSent += inLength;
+    StatsAddTotalBytesSent( inLength );
 
 	return send ( nAcceptSocket, 
 #ifdef _WIN32
@@ -324,14 +325,10 @@ void Socket::SetReuseAddress( bool bOn )
 
 bool Socket::IsReadable( int inTimeoutMilliseconds )
 {
-	timeval tv = { 0, inTimeoutMilliseconds * 1000 }; 
-	tv.tv_sec = tv.tv_usec / 1000000;
-	tv.tv_usec %= 1000000;
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(nAcceptSocket, &rfds);
-    // See if socket it writable
-    int ret = select(nAcceptSocket+1, &rfds, NULL, NULL, &tv);
+    pollfd fds[1] = { 0 };
+    fds[0].fd = nAcceptSocket;
+    fds[0].events = POLLIN;
+    int ret = poll(fds, 1, inTimeoutMilliseconds);
     if (ret == 0)
         return false;     // Not readable yet
     if (ret == -1)
@@ -342,14 +339,10 @@ bool Socket::IsReadable( int inTimeoutMilliseconds )
 
 bool Socket::IsWritable( int inTimeoutMilliseconds )
 {
-	timeval tv = { 0, inTimeoutMilliseconds * 1000 }; 
-	tv.tv_sec = tv.tv_usec / 1000000;
-	tv.tv_usec %= 1000000;
-    fd_set wfds;
-    FD_ZERO(&wfds);
-    FD_SET(nAcceptSocket, &wfds);
-    // See if socket it writable
-    int ret = select(nAcceptSocket+1, NULL, &wfds, NULL, &tv);
+    pollfd fds[1] = { 0 };
+    fds[0].fd = nAcceptSocket;
+    fds[0].events = POLLOUT;
+    int ret = poll(fds, 1, inTimeoutMilliseconds);
     if (ret == 0)
         return false;     // Not writable yet
     if (ret == -1)
@@ -360,18 +353,17 @@ bool Socket::IsWritable( int inTimeoutMilliseconds )
 
 bool Socket::IsAtError( int inTimeoutMilliseconds )
 {
-	timeval tv = { 0, inTimeoutMilliseconds * 1000 }; 
-	tv.tv_sec = tv.tv_usec / 1000000;
-	tv.tv_usec %= 1000000;
-    fd_set efds;
-    FD_ZERO(&efds);
-    FD_SET(nAcceptSocket, &efds);
-    // See if socket it writable
-    int ret = select(nAcceptSocket+1, NULL, NULL, &efds, &tv);
+    pollfd fds[1] = { 0 };
+    fds[0].fd = nAcceptSocket;
+    fds[0].events = POLLIN | POLLOUT;
+    int ret = poll(fds, 1, inTimeoutMilliseconds);
     if (ret == 0)
         return false;     // Not error
     if (ret == -1)
         return true;    // select error
+    if (ret > 0)
+        if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL))
+            return true;    // poll error
 
-    return true;
+    return false;
 }

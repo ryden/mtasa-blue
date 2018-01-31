@@ -58,11 +58,11 @@ bool SharedUtil::DirectoryExists ( const SString& strPath )
 }
 
 
-bool SharedUtil::FileLoad ( const SString& strFilename, SString& strBuffer, int iMaxSize )
+bool SharedUtil::FileLoad ( const SString& strFilename, SString& strBuffer, int iMaxSize, int iOffset )
 {
     strBuffer = "";
     std::vector < char > buffer;
-    if ( !FileLoad ( strFilename, buffer, iMaxSize ) )
+    if ( !FileLoad ( strFilename, buffer, iMaxSize, iOffset ) )
         return false;
     if ( buffer.size () )
         strBuffer = std::string ( &buffer.at ( 0 ), buffer.size () );
@@ -86,7 +86,7 @@ bool SharedUtil::FileDelete ( const SString& strFilename, bool bForce )
     if ( bForce )
         SetFileAttributes ( strFilename, FILE_ATTRIBUTE_NORMAL );
 #endif
-    return unlink ( strFilename ) == 0;
+    return File::Delete ( strFilename ) == 0;
 }
 
 bool SharedUtil::FileRename ( const SString& strFilenameOld, const SString& strFilenameNew )
@@ -101,22 +101,26 @@ bool SharedUtil::FileRename ( const SString& strFilenameOld, const SString& strF
 //
 // Load binary data from a file into an array
 //
-bool SharedUtil::FileLoad ( const SString& strFilename, std::vector < char >& buffer, int iMaxSize )
+bool SharedUtil::FileLoad ( const SString& strFilename, std::vector < char >& buffer, int iMaxSize, int iOffset )
 {
     buffer.clear ();
     // Open
-    FILE* fh = fopen ( strFilename, "rb" );
+    FILE* fh = File::Fopen ( strFilename, "rb" );
     if ( !fh )
         return false;
     // Get size
     fseek ( fh, 0, SEEK_END );
     int size = ftell ( fh );
-    rewind ( fh );
+
+    // Set offset
+    iOffset = std::min ( iOffset, size );
+    fseek ( fh, iOffset, SEEK_SET );
+    size -= iOffset;
 
     int bytesRead = 0;
-    if ( size > 0 && size < 1e9 )
+    if ( size > 0 && size < 1e9 )   // 1GB limit
     {
-        size = Min ( size, iMaxSize );
+        size = std::min ( size, iMaxSize );
         // Allocate space
         buffer.assign ( size, 0 );
         // Read into buffer
@@ -141,7 +145,7 @@ bool SharedUtil::FileSave ( const SString& strFilename, const void* pBuffer, uns
     if ( bForce )
         MakeSureDirExists ( strFilename );
 
-    FILE* fh = fopen ( strFilename, "wb" );
+    FILE* fh = File::Fopen ( strFilename, "wb" );
     if ( !fh )
         return false;
 
@@ -163,7 +167,7 @@ bool SharedUtil::FileAppend ( const SString& strFilename, const void* pBuffer, u
         SetFileAttributes ( strFilename, FILE_ATTRIBUTE_NORMAL );
 #endif
 
-    FILE* fh = fopen ( strFilename, "ab" );
+    FILE* fh = File::Fopen ( strFilename, "ab" );
     if ( !fh )
         return false;
 
@@ -181,7 +185,7 @@ bool SharedUtil::FileAppend ( const SString& strFilename, const void* pBuffer, u
 uint64 SharedUtil::FileSize ( const SString& strFilename  )
 {
     // Open
-    FILE* fh = fopen ( strFilename, "rb" );
+    FILE* fh = File::Fopen ( strFilename, "rb" );
     if ( !fh )
         return 0;
     // Get size
@@ -220,11 +224,7 @@ void SharedUtil::MakeSureDirExists ( const SString& strPath )
     {
         SString strTemp = SString::Join ( PATH_SEPERATOR, parts, 0, idx );
         // Call mkdir on this path
-        #ifdef WIN32
-            mkdir ( strTemp );
-        #else
-            mkdir ( strTemp ,0775 );
-        #endif
+        File::Mkdir ( strTemp );
     }
 }
 
@@ -375,12 +375,12 @@ SString SharedUtil::GetSystemTempPath ( void )
 
 SString SharedUtil::GetMTADataPath ( void )
 {
-    return PathJoin ( GetSystemCommonAppDataPath(), "MTA San Andreas All", GetMajorVersionString () );
+    return PathJoin ( GetSystemCommonAppDataPath(), GetProductCommonDataDir(), GetMajorVersionString () );
 }
 
 SString SharedUtil::GetMTADataPathCommon ( void )
 {
-    return PathJoin ( GetSystemCommonAppDataPath(), "MTA San Andreas All", "Common" );
+    return PathJoin ( GetSystemCommonAppDataPath(), GetProductCommonDataDir(), "Common" );
 }
 
 SString SharedUtil::GetMTATempPath ( void )
@@ -397,9 +397,11 @@ SString SharedUtil::GetLaunchPathFilename( void )
     {
         wchar_t szBuffer[2048];
         GetModuleFileNameW( NULL, szBuffer, NUMELMS(szBuffer) - 1 );
-        if ( IsShortPathName( szBuffer ) )
-            return GetSystemLongPathName( ToUTF8( szBuffer ) );
-        strLaunchPathFilename = ToUTF8( szBuffer );
+        
+        wchar_t fullPath[MAX_PATH];
+        GetFullPathNameW(szBuffer, MAX_PATH, fullPath, nullptr);
+
+        strLaunchPathFilename = ToUTF8(fullPath);
     }
     return strLaunchPathFilename;
 }
@@ -445,8 +447,14 @@ uint SharedUtil::GetPathFreeSpaceMB( const SString& strPath )
 
 SString SharedUtil::GetDriveNameWithNotEnoughSpace( uint uiResourcesPathMinMB, uint uiDataPathMinMB )
 {
+    SString strFileCachePath = GetCommonRegistryValue( "", "File Cache Path" );
+    if ( !strFileCachePath.empty() && DirectoryExists( PathJoin( strFileCachePath, "resources" ) ) )
+        if ( GetPathFreeSpaceMB( strFileCachePath ) < uiResourcesPathMinMB )
+            return GetPathDriveName( strFileCachePath );
+
     if ( GetPathFreeSpaceMB( GetMTASABaseDir() ) < uiResourcesPathMinMB )
         return GetPathDriveName( GetMTASABaseDir() );
+
     if ( GetPathFreeSpaceMB( GetSystemCommonAppDataPath() ) < uiDataPathMinMB )
         return GetPathDriveName( GetSystemCommonAppDataPath() );
    return ""; 
@@ -518,7 +526,7 @@ bool SharedUtil::DelTree ( const SString& strPath, const SString& strInsideHere 
     }
 
     DWORD dwBufferSize = ( wstrPath.length() + 3 ) * sizeof( wchar_t );
-    wchar_t *szBuffer = static_cast < wchar_t* > ( alloca ( dwBufferSize ) );
+    CScopeAlloc < wchar_t > szBuffer( dwBufferSize );
     memset ( szBuffer, 0, dwBufferSize );
     wcsncpy ( szBuffer, wstrPath, wstrPath.length() );
     SHFILEOPSTRUCTW sfos;
@@ -568,13 +576,13 @@ bool SharedUtil::FileCopy ( const SString& strSrc, const SString& strDest, bool 
         SetFileAttributes ( strDest, FILE_ATTRIBUTE_NORMAL );
 #endif
 
-    FILE* fhSrc = fopen ( strSrc, "rb" );
+    FILE* fhSrc = File::Fopen ( strSrc, "rb" );
     if ( !fhSrc )
     {
         return false;
     }
 
-    FILE* fhDst = fopen ( strDest, "wb" );
+    FILE* fhDst = File::Fopen ( strDest, "wb" );
     if ( !fhDst )
     {
         fclose ( fhSrc );
@@ -653,10 +661,11 @@ std::vector < SString > SharedUtil::FindFiles ( const SString& strMatch, bool bF
     DIR *Dir;
     struct dirent *DirEntry;
 
-    // Remove any filename matching characters
-    SString strSearchDirectory = PathJoin( strMatch.SplitLeft( "/", NULL, -1 ), "/" );
+    // Extract any filename matching characters
+    SString strFileMatch;
+    SString strSearchDirectory = PathJoin( PathConform( strMatch ).SplitLeft( "/", &strFileMatch, -1 ), "/" );
 
-    if ( ( Dir = opendir ( strMatch ) ) )
+    if ( ( Dir = opendir ( strSearchDirectory ) ) )
     {
         while ( ( DirEntry = readdir ( Dir ) ) != NULL )
         {
@@ -666,7 +675,13 @@ std::vector < SString > SharedUtil::FindFiles ( const SString& strMatch, bool bF
                 struct stat Info;
                 bool bIsDir = false;
 
-                SString strPath = PathJoin ( strMatch, DirEntry->d_name );
+                // Do wildcard matching if required
+                if ( !strFileMatch.empty() && !WildcardMatch( strFileMatch, DirEntry->d_name ) )
+                {
+                    continue;
+                }
+
+                SString strPath = PathJoin ( strSearchDirectory, DirEntry->d_name );
 
                 // Determine the file stats
                 if ( lstat ( strPath, &Info ) != -1 )
@@ -679,7 +694,7 @@ std::vector < SString > SharedUtil::FindFiles ( const SString& strMatch, bool bF
                         SString strAbsPath = strSearchDirectory + DirEntry->d_name;
                         struct stat attrib;
                         stat( strAbsPath, &attrib );
-                        MapInsert( sortMap, (uint64)attrib.st_mtime, DirEntry->d_name );
+                        MapInsert( sortMap, (uint64)attrib.st_mtime, SStringX( DirEntry->d_name ) );
                     }
                     else
                         strResult.push_back ( DirEntry->d_name );
@@ -785,18 +800,15 @@ SString SharedUtil::MakeUniquePath ( const SString& strInPathFilename )
 // Conform a path string for sorting
 SString SharedUtil::ConformPathForSorting ( const SString& strPathFilename )
 {
-    LOCAL_FUNCTION_START
-        static int mytolower( int c )
-        {
-            // Ignores locale and always does this:
-            if ( c >= 'A' && c <= 'Z' )
-                c = c - 'A' + 'a';
-            return c;
-        }
-    LOCAL_FUNCTION_END
-
     SString strResult = strPathFilename;
-    std::transform ( strResult.begin(), strResult.end(), strResult.begin(), LOCAL_FUNCTION::mytolower );
+    std::transform ( strResult.begin(), strResult.end(), strResult.begin(), 
+        [](int c)
+    {
+        // Ignores locale and always does this:
+        if (c >= 'A' && c <= 'Z')
+            c = c - 'A' + 'a';
+        return c;
+    });
     return strResult;
 }
 
@@ -829,7 +841,8 @@ SString SharedUtil::GetSystemShortPathName( const SString& strPath )
 {
     wchar_t szBuffer[32000];
     szBuffer[0] = 0;
-    GetShortPathNameW( FromUTF8( strPath ), szBuffer, NUMELMS( szBuffer ) - 1 );
+    if (!GetShortPathNameW( FromUTF8( strPath ), szBuffer, NUMELMS( szBuffer ) - 1 ))
+        return strPath;
     return ToUTF8( szBuffer );
 }
 
@@ -837,7 +850,62 @@ SString SharedUtil::GetSystemLongPathName( const SString& strPath )
 {
     wchar_t szBuffer[32000];
     szBuffer[0] = 0;
-    GetLongPathNameW( FromUTF8( strPath ), szBuffer, NUMELMS( szBuffer ) - 1 );
+    if (!GetLongPathNameW( FromUTF8( strPath ), szBuffer, NUMELMS( szBuffer ) - 1 ))
+        return strPath;
     return ToUTF8( szBuffer );
 }
 #endif // WIN32
+
+FILE* SharedUtil::File::Fopen(const char* szFilename, const char* szMode)
+{
+#ifdef WIN32
+	return _wfsopen( FromUTF8(szFilename), FromUTF8(szMode), _SH_DENYNO );
+#else
+    return fopen(szFilename, szMode);
+#endif
+}
+
+int SharedUtil::File::Mkdir(const char* szPath, int iMode)
+{
+#ifdef WIN32
+    return _wmkdir(FromUTF8(szPath));
+#else
+    return mkdir(szPath, (mode_t)iMode);
+#endif
+}
+
+int SharedUtil::File::Chdir(const char* szPath)
+{
+#ifdef WIN32
+    return _wchdir(FromUTF8(szPath));
+#else
+    return chdir(szPath);
+#endif
+}
+
+int SharedUtil::File::Rmdir(const char* szPath)
+{
+#ifdef WIN32
+    return _wrmdir(FromUTF8(szPath));
+#else
+    return rmdir(szPath);
+#endif
+}
+
+int SharedUtil::File::Delete(const char* szFilename)
+{
+#ifdef WIN32
+    return _wremove(FromUTF8(szFilename));
+#else
+    return remove(szFilename);
+#endif
+}
+
+int SharedUtil::File::Rename(const char* szOldFilename, const char * szNewFilename)
+{
+#ifdef WIN32
+    return _wrename(FromUTF8(szOldFilename), FromUTF8(szNewFilename));
+#else
+    return rename(szOldFilename, szNewFilename);
+#endif
+}

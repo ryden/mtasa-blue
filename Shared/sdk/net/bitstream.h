@@ -118,6 +118,8 @@ public:
     virtual void        AlignWriteToByteBoundary    ( void ) const = 0;
     virtual void        AlignReadToByteBoundary     ( void ) const = 0;
 
+	virtual unsigned char* GetData                  ( void ) const = 0;
+
     // Force long types to use 4 bytes
     bool Read( unsigned long& e )
     {
@@ -238,7 +240,7 @@ public:
     void WriteString ( const std::string& value )
     {
         // Write the length
-        unsigned short usLength = value.length ();
+        auto usLength = static_cast<unsigned short>(value.length ());
         Write ( usLength );
 
         // Write the characters

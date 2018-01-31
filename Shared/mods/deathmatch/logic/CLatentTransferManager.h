@@ -7,6 +7,7 @@
 *  Multi Theft Auto is available from http://www.multitheftauto.com/
 *
 *****************************************************************************/
+#pragma once
 
 typedef uint SSendHandle;
 typedef CAutoRefedPointer < CBuffer > CBufferRef;
@@ -98,7 +99,7 @@ struct SSendStatus
     int     iStartTimeMsOffset;     // Est. start time (Negative if already started)
     int     iEndTimeMsOffset;       // Est. end time 
     int     iTotalSize;
-    int     iPercentComplete;       // How much done
+    double  dPercentComplete;       // How much done
 };
 
 

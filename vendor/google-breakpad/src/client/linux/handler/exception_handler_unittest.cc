@@ -45,7 +45,6 @@
 #include "client/linux/handler/exception_handler.h"
 #include "client/linux/minidump_writer/minidump_writer.h"
 #include "common/linux/eintr_wrapper.h"
-#include "common/linux/file_id.h"
 #include "common/linux/ignore_ret.h"
 #include "common/linux/linux_libc_support.h"
 #include "common/tests/auto_tempdir.h"
@@ -80,7 +79,11 @@ void FlushInstructionCache(const char* memory, uint32_t memory_size) {
   // Provided by Android's <unistd.h>
   long begin = reinterpret_cast<long>(memory);
   long end = begin + static_cast<long>(memory_size);
+#if _MIPS_SIM == _ABIO32
   cacheflush(begin, end, 0);
+#else
+  syscall(__NR_cacheflush, begin, end, ICACHE);
+#endif
 # elif defined(__linux__)
   // See http://www.linux-mips.org/wiki/Cacheflush_Syscall.
   cacheflush(const_cast<char*>(memory), memory_size, ICACHE);
@@ -89,10 +92,6 @@ void FlushInstructionCache(const char* memory, uint32_t memory_size) {
 # endif
 #endif
 }
-
-// Length of a formatted GUID string =
-// sizeof(MDGUID) * 2 + 4 (for dashes) + 1 (null terminator)
-const int kGUIDStringSize = 37;
 
 void sigchld_handler(int signo) { }
 
@@ -193,6 +192,20 @@ static bool DoneCallback(const MinidumpDescriptor& descriptor,
 
 #ifndef ADDRESS_SANITIZER
 
+// This is a replacement for "*reinterpret_cast<volatile int*>(NULL) = 0;"
+// It is needed because GCC is allowed to assume that the program will
+// not execute any undefined behavior (UB) operation. Further, when GCC
+// observes that UB statement is reached, it can assume that all statements
+// leading to the UB one are never executed either, and can completely
+// optimize them out. In the case of ExceptionHandlerTest::ExternalDumper,
+// GCC-4.9 optimized out the entire set up of ExceptionHandler, causing
+// test failure.
+volatile int *p_null;  // external linkage, so GCC can't tell that it
+                       // remains NULL. Volatile just for a good measure.
+static void DoNullPointerDereference() {
+  *p_null = 1;
+}
+
 void ChildCrash(bool use_fd) {
   AutoTempDir temp_dir;
   int fds[2] = {0};
@@ -219,7 +232,7 @@ void ChildCrash(bool use_fd) {
                                            true, -1));
       }
       // Crash with the exception handler in scope.
-      *reinterpret_cast<volatile int*>(NULL) = 0;
+      DoNullPointerDereference();
     }
   }
   if (!use_fd)
@@ -243,8 +256,6 @@ TEST(ExceptionHandlerTest, ChildCrashWithPath) {
 TEST(ExceptionHandlerTest, ChildCrashWithFD) {
   ASSERT_NO_FATAL_FAILURE(ChildCrash(true));
 }
-
-#endif  // !ADDRESS_SANITIZER
 
 static bool DoneCallbackReturnFalse(const MinidumpDescriptor& descriptor,
                                     void* context,
@@ -287,15 +298,13 @@ static bool InstallRaiseSIGKILL() {
   return sigaction(SIGSEGV, &sa, NULL) != -1;
 }
 
-#ifndef ADDRESS_SANITIZER
-
 static void CrashWithCallbacks(ExceptionHandler::FilterCallback filter,
                                ExceptionHandler::MinidumpCallback done,
                                string path) {
   ExceptionHandler handler(
       MinidumpDescriptor(path), filter, done, NULL, true, -1);
   // Crash with the exception handler in scope.
-  *reinterpret_cast<volatile int*>(NULL) = 0;
+  DoNullPointerDereference();
 }
 
 TEST(ExceptionHandlerTest, RedeliveryOnFilterCallbackFalse) {
@@ -386,7 +395,7 @@ TEST(ExceptionHandlerTest, RedeliveryOnBadSignalHandlerFlag) {
               reinterpret_cast<void*>(SIG_ERR));
 
     // Crash with the exception handler in scope.
-    *reinterpret_cast<volatile int*>(NULL) = 0;
+    DoNullPointerDereference();
   }
   // SIGKILL means Breakpad's signal handler didn't crash.
   ASSERT_NO_FATAL_FAILURE(WaitForProcessToTerminate(child, SIGKILL));
@@ -756,8 +765,13 @@ TEST(ExceptionHandlerTest, InstructionPointerMemoryNullPointer) {
                              true, -1);
     // Try calling a NULL pointer.
     typedef void (*void_function)(void);
-    void_function memory_function = reinterpret_cast<void_function>(NULL);
+    // Volatile markings are needed to keep Clang from generating invalid
+    // opcodes.  See http://crbug.com/498354 for details.
+    volatile void_function memory_function =
+      reinterpret_cast<void_function>(NULL);
     memory_function();
+    // not reached
+    exit(1);
   }
   close(fds[1]);
 
@@ -798,19 +812,7 @@ TEST(ExceptionHandlerTest, ModuleInfo) {
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
     0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
   };
-  char module_identifier_buffer[kGUIDStringSize];
-  FileID::ConvertIdentifierToString(kModuleGUID,
-                                    module_identifier_buffer,
-                                    sizeof(module_identifier_buffer));
-  string module_identifier(module_identifier_buffer);
-  // Strip out dashes
-  size_t pos;
-  while ((pos = module_identifier.find('-')) != string::npos) {
-    module_identifier.erase(pos, 1);
-  }
-  // And append a zero, because module IDs include an "age" field
-  // which is always zero on Linux.
-  module_identifier += "0";
+  const string module_identifier = "33221100554477668899AABBCCDDEEFF0";
 
   // Get some memory.
   char* memory =
@@ -854,6 +856,8 @@ TEST(ExceptionHandlerTest, ModuleInfo) {
 
   unlink(minidump_desc.path());
 }
+
+#ifndef ADDRESS_SANITIZER
 
 static const unsigned kControlMsgSize =
     CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(struct ucred));
@@ -907,8 +911,6 @@ CrashHandler(const void* crash_context, size_t crash_context_size,
   return true;
 }
 
-#ifndef ADDRESS_SANITIZER
-
 TEST(ExceptionHandlerTest, ExternalDumper) {
   int fds[2];
   ASSERT_NE(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), -1);
@@ -922,7 +924,7 @@ TEST(ExceptionHandlerTest, ExternalDumper) {
     ExceptionHandler handler(MinidumpDescriptor("/tmp1"), NULL, NULL,
                              reinterpret_cast<void*>(fds[1]), true, -1);
     handler.set_crash_handler(CrashHandler);
-    *reinterpret_cast<volatile int*>(NULL) = 0;
+    DoNullPointerDereference();
   }
   close(fds[1]);
   struct msghdr msg = {0};
@@ -941,7 +943,7 @@ TEST(ExceptionHandlerTest, ExternalDumper) {
   const ssize_t n = HANDLE_EINTR(recvmsg(fds[0], &msg, 0));
   ASSERT_EQ(static_cast<ssize_t>(kCrashContextSize), n);
   ASSERT_EQ(kControlMsgSize, msg.msg_controllen);
-  ASSERT_EQ(static_cast<typeof(msg.msg_flags)>(0), msg.msg_flags);
+  ASSERT_EQ(static_cast<__typeof__(msg.msg_flags)>(0), msg.msg_flags);
   ASSERT_EQ(0, close(fds[0]));
 
   pid_t crashing_pid = -1;

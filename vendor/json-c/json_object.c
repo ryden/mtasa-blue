@@ -288,10 +288,15 @@ const char* json_object_to_json_string(struct json_object *jso)
 
 static void indent(struct printbuf *pb, int level, int flags)
 {
-	if (flags & JSON_C_TO_STRING_PRETTY)
-	{
-		printbuf_memset(pb, -1, ' ', level * 2);
-	}
+  if ( flags & JSON_C_TO_STRING_PRETTY )
+  {
+    if ( flags & JSON_C_TO_STRING_PRETTY_TAB ) {
+      printbuf_memset(pb, -1, '\t', level);
+    }
+    else {
+      printbuf_memset(pb, -1, ' ', level * 2);
+    }
+  }
 }
 
 /* json_object_object */
@@ -316,7 +321,7 @@ static int json_object_object_to_json_string(struct json_object* jso,
 				sprintbuf(pb, "\n");
 		}
 		had_children = 1;
-		if (flags & JSON_C_TO_STRING_SPACED)
+		if ( (flags & (JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY)) == JSON_C_TO_STRING_SPACED )
 			sprintbuf(pb, " ");
 		indent(pb, level+1, flags);
 		sprintbuf(pb, "\"");
@@ -336,7 +341,7 @@ static int json_object_object_to_json_string(struct json_object* jso,
 			sprintbuf(pb, "\n");
 		indent(pb,level,flags);
 	}
-	if (flags & JSON_C_TO_STRING_SPACED)
+    if ( (flags & (JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY)) == JSON_C_TO_STRING_SPACED )
 		return sprintbuf(pb, /*{*/ " }");
 	else
 		return sprintbuf(pb, /*{*/ "}");
@@ -579,7 +584,7 @@ static int json_object_double_to_json_string(struct json_object* jso,
     else
       size = snprintf(buf, sizeof(buf), "-Infinity");
   else
-    size = snprintf(buf, sizeof(buf), "%.17g", jso->o.c_double);
+    size = snprintf(buf, sizeof(buf), "%.16g", jso->o.c_double);
 
   p = strchr(buf, ',');
   if (p) {
@@ -772,7 +777,7 @@ static int json_object_array_to_json_string(struct json_object* jso,
 				sprintbuf(pb, "\n");
 		}
 		had_children = 1;
-		if (flags & JSON_C_TO_STRING_SPACED)
+        if ( (flags & (JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY)) == JSON_C_TO_STRING_SPACED )
 			sprintbuf(pb, " ");
 		indent(pb, level + 1, flags);
 		val = json_object_array_get_idx(jso, ii);
@@ -788,7 +793,7 @@ static int json_object_array_to_json_string(struct json_object* jso,
 		indent(pb,level,flags);
 	}
 
-	if (flags & JSON_C_TO_STRING_SPACED)
+    if ( (flags & (JSON_C_TO_STRING_SPACED | JSON_C_TO_STRING_PRETTY)) == JSON_C_TO_STRING_SPACED )
 		return sprintbuf(pb, " ]");
 	else
 		return sprintbuf(pb, "]");

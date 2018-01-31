@@ -30,11 +30,11 @@
 #include "google_breakpad/processor/minidump_processor.h"
 
 #include <assert.h>
-#include <stdio.h>
 
 #include <string>
 
 #include "common/scoped_ptr.h"
+#include "common/stdio_wrapper.h"
 #include "common/using_std_string.h"
 #include "google_breakpad/processor/call_stack.h"
 #include "google_breakpad/processor/minidump.h"
@@ -43,6 +43,7 @@
 #include "google_breakpad/processor/stack_frame_symbolizer.h"
 #include "processor/logging.h"
 #include "processor/stackwalker_x86.h"
+#include "processor/symbolic_constants_win.h"
 
 namespace google_breakpad {
 
@@ -50,7 +51,8 @@ MinidumpProcessor::MinidumpProcessor(SymbolSupplier *supplier,
                                      SourceLineResolverInterface *resolver)
     : frame_symbolizer_(new StackFrameSymbolizer(supplier, resolver)),
       own_frame_symbolizer_(true),
-      enable_exploitability_(false) {
+      enable_exploitability_(false),
+      enable_objdump_(false) {
 }
 
 MinidumpProcessor::MinidumpProcessor(SymbolSupplier *supplier,
@@ -58,14 +60,16 @@ MinidumpProcessor::MinidumpProcessor(SymbolSupplier *supplier,
                                      bool enable_exploitability)
     : frame_symbolizer_(new StackFrameSymbolizer(supplier, resolver)),
       own_frame_symbolizer_(true),
-      enable_exploitability_(enable_exploitability) {
+      enable_exploitability_(enable_exploitability),
+      enable_objdump_(false) {
 }
 
 MinidumpProcessor::MinidumpProcessor(StackFrameSymbolizer *frame_symbolizer,
                                      bool enable_exploitability)
     : frame_symbolizer_(frame_symbolizer),
       own_frame_symbolizer_(false),
-      enable_exploitability_(enable_exploitability) {
+      enable_exploitability_(enable_exploitability),
+      enable_objdump_(false) {
   assert(frame_symbolizer_);
 }
 
@@ -86,6 +90,9 @@ ProcessResult MinidumpProcessor::Process(
     return PROCESS_ERROR_NO_MINIDUMP_HEADER;
   }
   process_state->time_date_stamp_ = header->time_date_stamp;
+
+  bool has_process_create_time =
+      GetProcessCreateTime(dump, &process_state->process_create_time_);
 
   bool has_cpu_info = GetCPUInfo(dump, &process_state->system_info_);
   bool has_os_info = GetOSInfo(dump, &process_state->system_info_);
@@ -135,14 +142,15 @@ ProcessResult MinidumpProcessor::Process(
   }
 
   BPLOG(INFO) << "Minidump " << dump->path() << " has " <<
-      (has_cpu_info           ? "" : "no ") << "CPU info, " <<
-      (has_os_info            ? "" : "no ") << "OS info, " <<
-      (breakpad_info != NULL  ? "" : "no ") << "Breakpad info, " <<
-      (exception != NULL      ? "" : "no ") << "exception, " <<
-      (module_list != NULL    ? "" : "no ") << "module list, " <<
-      (threads != NULL        ? "" : "no ") << "thread list, " <<
-      (has_dump_thread        ? "" : "no ") << "dump thread, and " <<
-      (has_requesting_thread  ? "" : "no ") << "requesting thread";
+      (has_cpu_info            ? "" : "no ") << "CPU info, " <<
+      (has_os_info             ? "" : "no ") << "OS info, " <<
+      (breakpad_info != NULL   ? "" : "no ") << "Breakpad info, " <<
+      (exception != NULL       ? "" : "no ") << "exception, " <<
+      (module_list != NULL     ? "" : "no ") << "module list, " <<
+      (threads != NULL         ? "" : "no ") << "thread list, " <<
+      (has_dump_thread         ? "" : "no ") << "dump thread, " <<
+      (has_requesting_thread   ? "" : "no ") << "requesting thread, and " <<
+      (has_process_create_time ? "" : "no ") << "process create time";
 
   bool interrupted = false;
   bool found_requesting_thread = false;
@@ -259,6 +267,7 @@ ProcessResult MinidumpProcessor::Process(
       // one bad thread.
       BPLOG(ERROR) << "No stackwalker for " << thread_string;
     }
+    stack->set_tid(thread_id);
     process_state->threads_.push_back(stack.release());
     process_state->thread_memory_regions_.push_back(thread_memory);
   }
@@ -284,7 +293,9 @@ ProcessResult MinidumpProcessor::Process(
   // rating.
   if (enable_exploitability_) {
     scoped_ptr<Exploitability> exploitability(
-        Exploitability::ExploitabilityForPlatform(dump, process_state));
+        Exploitability::ExploitabilityForPlatform(dump,
+                                                  process_state,
+                                                  enable_objdump_));
     // The engine will be null if the platform is not supported
     if (exploitability != NULL) {
       process_state->exploitability_ = exploitability->CheckExploitability();
@@ -514,6 +525,10 @@ bool MinidumpProcessor::GetCPUInfo(Minidump *dump, SystemInfo *info) {
       info->cpu = "mips";
       break;
     }
+    case MD_CPU_ARCHITECTURE_MIPS64: {
+      info->cpu = "mips64";
+      break;
+    }
 
     default: {
       // Assign the numeric architecture ID into the CPU string.
@@ -619,6 +634,32 @@ bool MinidumpProcessor::GetOSInfo(Minidump *dump, SystemInfo *info) {
 }
 
 // static
+bool MinidumpProcessor::GetProcessCreateTime(Minidump* dump,
+                                             uint32_t* process_create_time) {
+  assert(dump);
+  assert(process_create_time);
+
+  *process_create_time = 0;
+
+  MinidumpMiscInfo* minidump_misc_info = dump->GetMiscInfo();
+  if (!minidump_misc_info) {
+    return false;
+  }
+
+  const MDRawMiscInfo* md_raw_misc_info = minidump_misc_info->misc_info();
+  if (!md_raw_misc_info) {
+    return false;
+  }
+
+  if (!(md_raw_misc_info->flags1 & MD_MISCINFO_FLAGS1_PROCESS_TIMES)) {
+    return false;
+  }
+
+  *process_create_time = md_raw_misc_info->process_create_time;
+  return true;
+}
+
+// static
 string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
   MinidumpException *exception = dump->GetException();
   if (!exception)
@@ -705,6 +746,19 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
                     BPLOG(INFO) << "Unknown exception reason " << reason;
                     break;
                 }
+              } else if (raw_system_info->processor_architecture ==
+                         MD_CPU_ARCHITECTURE_X86 ||
+                         raw_system_info->processor_architecture ==
+                         MD_CPU_ARCHITECTURE_AMD64) {
+                switch (exception_flags) {
+                  case MD_EXCEPTION_CODE_MAC_X86_GENERAL_PROTECTION_FAULT:
+                    reason.append("EXC_I386_GPFLT");
+                    break;
+                  default:
+                    reason.append(flags_string);
+                    BPLOG(INFO) << "Unknown exception reason " << reason;
+                    break;
+                }
               } else {
                 reason.append(flags_string);
                 BPLOG(INFO) << "Unknown exception reason " << reason;
@@ -755,25 +809,26 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
               }
               break;
             }
+            case MD_CPU_ARCHITECTURE_AMD64:
             case MD_CPU_ARCHITECTURE_X86: {
               switch (exception_flags) {
                 case MD_EXCEPTION_CODE_MAC_X86_INVALID_OPERATION:
                   reason.append("EXC_I386_INVOP");
                   break;
                 case MD_EXCEPTION_CODE_MAC_X86_INVALID_TASK_STATE_SEGMENT:
-                  reason.append("EXC_INVTSSFLT");
+                  reason.append("EXC_I386_INVTSSFLT");
                   break;
                 case MD_EXCEPTION_CODE_MAC_X86_SEGMENT_NOT_PRESENT:
-                  reason.append("EXC_SEGNPFLT");
+                  reason.append("EXC_I386_SEGNPFLT");
                   break;
                 case MD_EXCEPTION_CODE_MAC_X86_STACK_FAULT:
-                  reason.append("EXC_STKFLT");
+                  reason.append("EXC_I386_STKFLT");
                   break;
                 case MD_EXCEPTION_CODE_MAC_X86_GENERAL_PROTECTION_FAULT:
-                  reason.append("EXC_GPFLT");
+                  reason.append("EXC_I386_GPFLT");
                   break;
                 case MD_EXCEPTION_CODE_MAC_X86_ALIGNMENT_FAULT:
-                  reason.append("EXC_ALIGNFLT");
+                  reason.append("EXC_I386_ALIGNFLT");
                   break;
                 default:
                   reason.append(flags_string);
@@ -826,6 +881,7 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
               }
               break;
             }
+            case MD_CPU_ARCHITECTURE_AMD64:
             case MD_CPU_ARCHITECTURE_X86: {
               switch (exception_flags) {
                 case MD_EXCEPTION_CODE_MAC_X86_DIV:
@@ -926,6 +982,7 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
               }
               break;
             }
+            case MD_CPU_ARCHITECTURE_AMD64:
             case MD_CPU_ARCHITECTURE_X86: {
               switch (exception_flags) {
                 case MD_EXCEPTION_CODE_MAC_X86_SGL:
@@ -985,8 +1042,8 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
           // For EXCEPTION_ACCESS_VIOLATION, Windows puts the address that
           // caused the fault in exception_information[1].
           // exception_information[0] is 0 if the violation was caused by
-          // an attempt to read data and 1 if it was an attempt to write
-          // data.
+          // an attempt to read data, 1 if it was an attempt to write data,
+          // and 8 if this was a data execution violation.
           // This information is useful in addition to the code address, which
           // will be present in the crash thread's instruction field anyway.
           if (raw_exception->exception_record.number_parameters >= 1) {
@@ -1017,7 +1074,48 @@ string MinidumpProcessor::GetCrashReason(Minidump *dump, uint64_t *address) {
           }
           break;
         case MD_EXCEPTION_CODE_WIN_IN_PAGE_ERROR:
-          reason = "EXCEPTION_IN_PAGE_ERROR";
+          // For EXCEPTION_IN_PAGE_ERROR, Windows puts the address that
+          // caused the fault in exception_information[1].
+          // exception_information[0] is 0 if the violation was caused by
+          // an attempt to read data, 1 if it was an attempt to write data,
+          // and 8 if this was a data execution violation.
+          // exception_information[2] contains the underlying NTSTATUS code,
+          // which is the explanation for why this error occured.
+          // This information is useful in addition to the code address, which
+          // will be present in the crash thread's instruction field anyway.
+          if (raw_exception->exception_record.number_parameters >= 1) {
+            MDInPageErrorTypeWin av_type =
+                static_cast<MDInPageErrorTypeWin>
+                (raw_exception->exception_record.exception_information[0]);
+            switch (av_type) {
+              case MD_IN_PAGE_ERROR_WIN_READ:
+                reason = "EXCEPTION_IN_PAGE_ERROR_READ";
+                break;
+              case MD_IN_PAGE_ERROR_WIN_WRITE:
+                reason = "EXCEPTION_IN_PAGE_ERROR_WRITE";
+                break;
+              case MD_IN_PAGE_ERROR_WIN_EXEC:
+                reason = "EXCEPTION_IN_PAGE_ERROR_EXEC";
+                break;
+              default:
+                reason = "EXCEPTION_IN_PAGE_ERROR";
+                break;
+            }
+          } else {
+            reason = "EXCEPTION_IN_PAGE_ERROR";
+          }
+          if (address &&
+              raw_exception->exception_record.number_parameters >= 2) {
+            *address =
+                raw_exception->exception_record.exception_information[1];
+          }
+          if (raw_exception->exception_record.number_parameters >= 3) {
+            uint32_t ntstatus =
+                static_cast<uint32_t>
+                (raw_exception->exception_record.exception_information[2]);
+            reason.append(" / ");
+            reason.append(NTStatusToString(ntstatus));
+          }
           break;
         case MD_EXCEPTION_CODE_WIN_INVALID_HANDLE:
           reason = "EXCEPTION_INVALID_HANDLE";

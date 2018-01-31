@@ -24,6 +24,11 @@ namespace EHashFunction
 }
 using EHashFunction::EHashFunctionType;
 
+enum class PasswordHashFunction
+{
+    Bcrypt
+};
+
 namespace SharedUtil
 {
     struct MD5
@@ -44,11 +49,12 @@ namespace SharedUtil
         static SString                  CalculateHexString ( const char* szFilename );
         static SString                  CalculateHexString ( const void* pBuffer, size_t sizeLength );
 
-    private:
         void                            Init ( void );
         void                            Update ( unsigned char* input, unsigned int input_length );
         void                            Finalize ( void );
+        const unsigned char*            GetResult ( void ) const;
 
+    private:
         void                            Transform ( unsigned char* pBuffer );
 
         static void                     Encode ( unsigned char *dest, unsigned int  *src, unsigned long length );
@@ -79,11 +85,18 @@ namespace SharedUtil
     unsigned int    HashString                  ( const char* szString );
     unsigned int    HashString                  ( const char* szString, unsigned int length );
 
+#ifdef SDK_WITH_BCRYPT
+    SString         BcryptHash                  (const SString& password, SString salt = "", std::size_t cost = 10);
+    bool            BcryptVerify                (const SString& password, const SString& hash);
+#endif
+
     SString         ConvertDataToHexString      ( const void* pData, uint uiLength );
     void            ConvertHexStringToData      ( const SString& strString, void* pOutData, uint uiLength );
     void            GenerateSha256              ( const void* pData, uint uiLength, uchar output[32] );
     SString         GenerateSha256HexString     ( const void* pData, uint uiLength );
     SString         GenerateSha256HexString     ( const SString& strData );
+    SString         GenerateSha256HexStringFromFile ( const SString& strFilename );
     SString         GenerateHashHexString       ( EHashFunctionType hashFunction, const void* pData, uint uiLength );
     SString         GenerateHashHexString       ( EHashFunctionType hashFunction, const SString& strData );
+    SString         GenerateHashHexStringFromFile ( EHashFunctionType hashFunction, const SString& strFilename, int iMaxSize = INT_MAX, int iOffset = 0 );
 }

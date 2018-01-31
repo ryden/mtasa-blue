@@ -68,9 +68,12 @@
       'sources': [
         '<(DEPTH)/common/string_conversion.cc',
         '<(DEPTH)/processor/basic_code_modules.cc',
+        '<(DEPTH)/processor/dump_context.cc',
+        '<(DEPTH)/processor/dump_object.cc',
         '<(DEPTH)/processor/logging.cc',
         '<(DEPTH)/processor/minidump.cc',
         '<(DEPTH)/processor/pathname_stripper.cc',
+        '<(DEPTH)/processor/proc_maps_linux.cc',
       ]
     }
   ],

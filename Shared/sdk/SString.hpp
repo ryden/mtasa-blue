@@ -45,14 +45,14 @@ SString& SString::vFormat ( const char* szFormat, va_list vl )
     }
 
     // Allocate buffer
-    char* szDest = static_cast < char* > ( malloc ( iRequiredCapacity + 1 ) );
+    char* szDest = static_cast < char* > ( malloc ( iRequiredCapacity + 2 ) );
 
     // Try to format the string into the buffer.
     va_copy ( vlLocal, vl );
     int iSize;
     __try
     {
-        iSize = vsnprintf ( szDest, iRequiredCapacity, szFormat, vlLocal );
+        iSize = vsnprintf ( szDest, iRequiredCapacity + 1, szFormat, vlLocal );
     }
     __except ( EXCEPTION_EXECUTE_HANDLER )
     {
@@ -419,7 +419,7 @@ SString SString::SubStr ( int iPos, int iCount ) const
         iCount += iPos;
         iPos = 0;
     }
-    iCount = Max ( 0, iCount );
+    iCount = std::max ( 0, iCount );
     if ( iPos + iCount > (int)length () )
     {
         iCount = length () - iPos;
@@ -466,8 +466,8 @@ bool SString::BeginsWithI ( const SString& strOther ) const
 SString SString::Join ( const SString& strDelim, const std::vector < SString >& parts, int iFirst, int iCount )
 {
     SString strResult;
-    int iLast = Min < int > ( iFirst + iCount, parts.size () ) - 1;
-    iFirst = Max < int > ( iFirst, 0 );
+    int iLast = std::min < int > ( iFirst + iCount, parts.size () ) - 1;
+    iFirst = std::max < int > (iFirst, 0);
     for ( int i = iFirst ; i <= iLast ; i++ )
     {
         if ( i != iFirst )

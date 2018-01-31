@@ -13,8 +13,9 @@
 *****************************************************************************/
 
 #include "UTF8.h"
-#include "UTF8Detect.cpp"
+#include "UTF8Detect.hpp"
 #ifdef WIN32
+    #include <ctime>
     #include <direct.h>
     #include <shellapi.h>
     #include <TlHelp32.h>
@@ -33,15 +34,28 @@
 
 CCriticalSection CRefCountable::ms_CS;
 std::map < uint, uint > ms_ReportAmountMap;
+SString ms_strProductRegistryPath;
+SString ms_strProductCommonDataDir;
+SString ms_strProductVersion;
+
+struct SReportLine
+{
+    SString strText;
+    uint    uiId;
+    operator SString&   ( void )                            { return strText; }
+    bool operator ==    ( const SReportLine& other ) const  { return strText == other.strText && uiId == other.uiId; }
+};
+CDuplicateLineFilter < SReportLine > ms_ReportLineFilter;
 
 #ifdef MTA_CLIENT
-#ifdef WIN32
 
+#define PRODUCT_REGISTRY_PATH       "Software\\Multi Theft Auto: San Andreas All"       // HKLM
+#define PRODUCT_COMMON_DATA_DIR     "MTA San Andreas All"                               // C:\ProgramData
 #define TROUBLE_URL1 "http://updatesa.multitheftauto.com/sa/trouble/?v=_VERSION_&id=_ID_&tr=_TROUBLE_"
 
 
 #ifndef MTA_DM_ASE_VERSION
-    #include <../../MTA10/version.h>
+    #include <../../Client/version.h>
 #endif
 
 //
@@ -51,12 +65,14 @@ std::map < uint, uint > ms_ReportAmountMap;
 #ifdef _WINDOWS_ //Only for modules that use windows.h
     int SharedUtil::MessageBoxUTF8 ( HWND hWnd, SString lpText, SString lpCaption, UINT uType )
     {
+        // Default to warning icon
+        if ( ( uType & ICON_MASK_VALUE ) == 0 )
+            uType |= ICON_WARNING;
         WString strText = MbUTF8ToUTF16 ( lpText );
         WString strCaption = MbUTF8ToUTF16 ( lpCaption );
         return MessageBoxW ( hWnd, strText.c_str(), strCaption.c_str(), uType );
     }
 #endif
-
 
 //
 // Get startup directory as saved in the registry by the launcher
@@ -70,7 +86,7 @@ SString SharedUtil::GetMTASABaseDir ( void )
         strInstallRoot = GetRegistryValue ( "", "Last Run Location" );
         if ( strInstallRoot.empty () )
         {
-            MessageBoxUTF8 ( 0, _("Multi Theft Auto has not been installed properly, please reinstall."), _("Error")+_E("U01"), MB_OK | MB_TOPMOST );
+            MessageBoxUTF8 ( 0, _("Multi Theft Auto has not been installed properly, please reinstall."), _("Error")+_E("U01"), MB_OK | MB_ICONERROR | MB_TOPMOST );
             TerminateProcess ( GetCurrentProcess (), 9 );
         }
     }
@@ -101,7 +117,7 @@ bool SharedUtil::IsGTAProcess ( void )
 //
 // Write a registry string value
 //
-static void WriteRegistryStringValue ( HKEY hkRoot, const char* szSubKey, const char* szValue, const SString& strBuffer )
+static void WriteRegistryStringValue ( HKEY hkRoot, const char* szSubKey, const char* szValue, const SString& strBuffer, bool bFlush = false )
 {
     HKEY hkTemp;
     WString wstrSubKey = FromUTF8( szSubKey );
@@ -111,6 +127,11 @@ static void WriteRegistryStringValue ( HKEY hkRoot, const char* szSubKey, const 
     if ( hkTemp )
     {
         RegSetValueExW ( hkTemp, wstrValue, NULL, REG_SZ, (LPBYTE)wstrBuffer.c_str (), ( wstrBuffer.length () + 1 ) * sizeof( wchar_t ) );
+        if ( bFlush )
+        {
+            // Very slow. Only needed if there is a risk of BSOD soon afterwards.
+            RegFlushKey ( hkTemp );
+        }
         RegCloseKey ( hkTemp );
     }
 }
@@ -132,11 +153,11 @@ static SString ReadRegistryStringValue ( HKEY hkRoot, const char* szSubKey, cons
         DWORD dwBufferSize;
         if ( RegQueryValueExW ( hkTemp, wstrValue, NULL, NULL, NULL, &dwBufferSize ) == ERROR_SUCCESS )
         {
-            wchar_t* szBuffer = static_cast < wchar_t* > ( alloca ( dwBufferSize + sizeof( wchar_t ) ) );
-            if ( RegQueryValueExW ( hkTemp, wstrValue, NULL, NULL, (LPBYTE)szBuffer, &dwBufferSize ) == ERROR_SUCCESS )
+            CScopeAlloc < wchar_t > szBuffer( dwBufferSize + sizeof( wchar_t ) );
+            if ( RegQueryValueExW ( hkTemp, wstrValue, NULL, NULL, (LPBYTE)(wchar_t*)szBuffer, &dwBufferSize ) == ERROR_SUCCESS )
             {
                 szBuffer[ dwBufferSize / sizeof( wchar_t ) ] = 0;
-                strOutResult = ToUTF8( szBuffer );
+                strOutResult = ToUTF8( (wchar_t*)szBuffer );
                 bResult = true;
             }
         }
@@ -176,36 +197,6 @@ SString SharedUtil::GetSystemRegistryValue ( uint hKey, const SString& strPath, 
 }
 
 
-
-// Old layout:
-//              HKCU Software\\Multi Theft Auto: San Andreas\\             - For 1.0
-//              HKCU Software\\Multi Theft Auto: San Andreas 1.1\\         - For 1.1
-//
-static SString MakeVersionRegistryPathLegacy ( const SString& strVersion, const SString& strPath )
-{
-    SString strResult = "Software\\Multi Theft Auto: San Andreas";
-    if ( strVersion != "1.0" )
-        strResult += " " + strVersion;
-
-    strResult = PathJoin ( strResult, strPath );
-    strResult = strResult.TrimEnd ( "\\" );
-    return strResult;
-}
-
-
-// Get/set registry values for a version using the old (HKCU) layout
-void SharedUtil::SetVersionRegistryValueLegacy ( const SString& strVersion, const SString& strPath, const SString& strName, const SString& strValue )
-{
-    WriteRegistryStringValue ( HKEY_CURRENT_USER, MakeVersionRegistryPathLegacy ( strVersion, strPath ), strName, strValue );
-}
-
-SString SharedUtil::GetVersionRegistryValueLegacy ( const SString& strVersion, const SString& strPath, const SString& strName )
-{
-    return ReadRegistryStringValue ( HKEY_CURRENT_USER, MakeVersionRegistryPathLegacy ( strVersion, strPath ), strName, NULL );
-}
-
-
-
 //
 // New layout:
 //              HKLM Software\\Multi Theft Auto: San Andreas All\\Common    - For all versions
@@ -214,7 +205,7 @@ SString SharedUtil::GetVersionRegistryValueLegacy ( const SString& strVersion, c
 //
 static SString MakeVersionRegistryPath ( const SString& strVersion, const SString& strPath )
 {
-    SString strResult = PathJoin ( "Software\\Multi Theft Auto: San Andreas All", strVersion, strPath );
+    SString strResult = PathJoin ( GetProductRegistryPath(), strVersion, strPath );
     return strResult.TrimEnd ( "\\" );
 }
 
@@ -222,9 +213,9 @@ static SString MakeVersionRegistryPath ( const SString& strVersion, const SStrin
 // Registry values
 // 
 // Get/set registry values for the current version
-void SharedUtil::SetRegistryValue ( const SString& strPath, const SString& strName, const SString& strValue )
+void SharedUtil::SetRegistryValue ( const SString& strPath, const SString& strName, const SString& strValue, bool bFlush )
 {
-    WriteRegistryStringValue ( HKEY_LOCAL_MACHINE, MakeVersionRegistryPath ( GetMajorVersionString (), strPath ), strName, strValue );
+    WriteRegistryStringValue ( HKEY_LOCAL_MACHINE, MakeVersionRegistryPath ( GetMajorVersionString (), strPath ), strName, strValue, bFlush );
 }
 
 SString SharedUtil::GetRegistryValue ( const SString& strPath, const SString& strName )
@@ -313,6 +304,41 @@ bool SharedUtil::GetOnRestartCommand ( SString& strOperation, SString& strFile, 
     }
     return false;
 }
+
+
+//
+// What server to connect to after update
+//
+void SharedUtil::SetPostUpdateConnect( const SString& strHost )
+{
+    CArgMap argMap;
+    argMap.Set( "host", strHost );
+    argMap.Set( "time", std::to_string( (int64_t)time( nullptr ) ) );
+    SetRegistryValue( "", "PostUpdateConnect", argMap.ToString() );
+}
+
+
+//
+// What server to connect to after update
+//
+SString SharedUtil::GetPostUpdateConnect( void )
+{
+    SString strPostUpdateConnect = GetRegistryValue( "", "PostUpdateConnect" );
+    SetPostUpdateConnect( "" );
+
+    CArgMap argMap;
+    argMap.SetFromString( strPostUpdateConnect );
+    SString strHost = argMap.Get( "host" );
+    time_t timeThen = (time_t)std::atoll( argMap.Get( "time" ) );
+
+    // Expire after 5 mins
+    double seconds = difftime( time( NULL ), timeThen );
+    if ( ( seconds < 0 || seconds > 60 * 5 ) && timeThen != 0 )
+        strHost = "";
+
+    return strHost;
+}
+
 #endif
 
 
@@ -481,7 +507,54 @@ void SharedUtil::WatchDogSetLastRunCrash( bool bOn )
     bWatchDogWasLastRunCrashValue = bOn;
 }
 
+//
+// Special things
+//
+void SharedUtil::WatchDogUserDidInteractWithMenu( void )
+{
+    WatchDogCompletedSection( WD_SECTION_NOT_USED_MAIN_MENU );
+    WatchDogCompletedSection( WD_SECTION_POST_INSTALL );
+}
 
+
+void SharedUtil::SetProductRegistryPath( const SString& strRegistryPath )
+{
+    assert( ms_strProductRegistryPath.empty() && !strRegistryPath.empty() );
+    ms_strProductRegistryPath = strRegistryPath;
+}
+
+const SString& SharedUtil::GetProductRegistryPath( void )
+{
+    if ( ms_strProductRegistryPath.empty() )
+        ms_strProductRegistryPath = PRODUCT_REGISTRY_PATH;
+    return ms_strProductRegistryPath;
+}
+
+void SharedUtil::SetProductCommonDataDir( const SString& strCommonDataDir )
+{
+    assert( ms_strProductCommonDataDir.empty() && !strCommonDataDir.empty() );
+    ms_strProductCommonDataDir = strCommonDataDir;
+}
+
+const SString& SharedUtil::GetProductCommonDataDir( void )
+{
+    if ( ms_strProductCommonDataDir.empty() )
+        ms_strProductCommonDataDir = PRODUCT_COMMON_DATA_DIR;
+    return ms_strProductCommonDataDir;
+}
+
+void SharedUtil::SetProductVersion( const SString& strVersion )
+{
+    assert( ms_strProductVersion.empty() && !strVersion.empty() );
+    ms_strProductVersion = strVersion;
+}
+
+const SString& SharedUtil::GetProductVersion( void )
+{
+    if ( ms_strProductVersion.empty() )
+        ms_strProductVersion = SString( "%d.%d.%d-%d.%05d", MTASA_VERSION_MAJOR, MTASA_VERSION_MINOR, MTASA_VERSION_MAINTENANCE, MTASA_VERSION_TYPE, MTASA_VERSION_BUILD );
+    return ms_strProductVersion;
+}
 
 void SharedUtil::SetClipboardText ( const SString& strText )
 {
@@ -566,13 +639,13 @@ bool SharedUtil::ProcessPendingBrowseToSolution ( void )
         if ( !strMessageBoxMessage.empty() )
             strMessageBoxMessage += "\n\n\n";
         strMessageBoxMessage += _("Do you want to see some on-line help about this problem ?");
-        if ( IDYES != MessageBoxUTF8( NULL, strMessageBoxMessage, strTitle, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST ) )
+        if ( IDYES != MessageBoxUTF8( NULL, strMessageBoxMessage, strTitle, MB_YESNO | MB_TOPMOST | ( iFlags & ICON_MASK_VALUE ) ) )
             return false;
     }
     else
     {
         if ( !strMessageBoxMessage.empty() )
-            MessageBoxUTF8 ( NULL, strMessageBoxMessage, strTitle, MB_OK | MB_ICONEXCLAMATION | MB_TOPMOST );
+            MessageBoxUTF8 ( NULL, strMessageBoxMessage, strTitle, MB_OK | MB_TOPMOST | ( iFlags & ICON_MASK_VALUE ) );
         if ( iFlags & SHOW_MESSAGE_ONLY )
             return true;
     }
@@ -631,17 +704,70 @@ static SString GetReportLogHeaderText ( void )
 
 void SharedUtil::AddReportLog ( uint uiId, const SString& strText, uint uiAmountLimit )
 {
-    uint& uiAmount = MapGet( ms_ReportAmountMap, uiId );
-    if ( uiAmount++ >= uiAmountLimit )
-        return;
+    if ( uiAmountLimit )
+    {
+        uint& uiAmount = MapGet( ms_ReportAmountMap, uiId );
+        if ( uiAmount++ >= uiAmountLimit )
+            return;
+    }
 
-    SString strPathFilename = PathJoin ( GetMTADataPath (), "report.log" );
-    MakeSureDirExists ( strPathFilename );
+    ms_ReportLineFilter.AddLine( { strText, uiId } );
 
-    SString strMessage ( "%u: %s %s [%s] - %s\n", uiId, GetTimeString ( true, false ).c_str (), GetReportLogHeaderText ().c_str (), GetReportLogProcessTag().c_str (), strText.c_str () );
-    FileAppend ( strPathFilename, &strMessage.at ( 0 ), strMessage.length () );
-    OutputDebugLine ( SStringX ( "[ReportLog] " ) + strMessage );
+    SReportLine line;
+    while ( ms_ReportLineFilter.PopOutputLine( line ) )
+    {
+        const SString& strText = line.strText;
+        uint uiId = line.uiId;
+    
+        SString strPathFilename = PathJoin ( GetMTADataPath (), "report.log" );
+        MakeSureDirExists ( strPathFilename );
+    
+        SString strMessage ( "%u: %s %s [%s] - %s\n", uiId, GetTimeString ( true, false ).c_str (), GetReportLogHeaderText ().c_str (), GetReportLogProcessTag().c_str (), strText.c_str () );
+        FileAppend ( strPathFilename, &strMessage.at ( 0 ), strMessage.length () );
+        OutputDebugLine ( SStringX ( "[ReportLog] " ) + strMessage );
+    }
 }
+
+
+//
+// Track results of new features by avoiding heap memory allocations
+// Avoid using this function if you have plenty of memory available
+//
+void SharedUtil::AddExceptionReportLog ( uint uiId, const char * szExceptionName, const char * szExceptionText )
+{
+    constexpr size_t BOILERPLATE_SIZE           = 46;
+    constexpr size_t MAX_EXCEPTION_NAME_SIZE    = 64;
+    constexpr size_t MAX_EXCEPTION_TEXT_SIZE    = 256;
+    static char szOutput [ BOILERPLATE_SIZE + MAX_EXCEPTION_NAME_SIZE + MAX_EXCEPTION_TEXT_SIZE ] = { 0 };
+
+    SYSTEMTIME s = { 0 };
+    GetSystemTime ( &s );
+
+    sprintf_s ( szOutput, "%u: %04hu-%02hu-%02hu %02hu:%02hu:%02hu - Caught %.*s exception: %.*s\n",
+        uiId, 
+        s.wYear, s.wMonth,  s.wDay,
+        s.wHour, s.wMinute, s.wSecond,
+        MAX_EXCEPTION_NAME_SIZE, szExceptionName, 
+        MAX_EXCEPTION_TEXT_SIZE, szExceptionText
+    );
+
+    OutputDebugString ( "[ReportLog] " );
+    OutputDebugString ( &szOutput[0] );
+
+    try
+    {
+        SString strMessage = szOutput;
+        SString strPathFilename = PathJoin ( GetMTADataPath (), "report.log" );
+        MakeSureDirExists ( strPathFilename );
+        FileAppend ( strPathFilename, &strMessage.at ( 0 ), strMessage.length ( ) );
+    }
+    catch ( std::bad_alloc& )
+    {
+        // At the time of writing this function, it is only called from other 'try-catch' blocks
+        // so we can assume we literally ran out of all available memory here and ignore the exception
+    }
+}
+
 
 void SharedUtil::SetReportLogContents ( const SString& strText )
 {
@@ -709,7 +835,7 @@ void WriteEvent( const char* szType, const SString& strText )
             WriteEvent( szType, lineList[i] );
         return;
     }
-    SString strPathFilename = CalcMTASAPath( PathJoin( "mta", "logfile.txt" ) );
+    SString strPathFilename = CalcMTASAPath( PathJoin( "mta", "logs", "logfile.txt" ) );
     SString strMessage( "%s - %s %s", *GetLocalTimeString(), szType, *strText );
     FileAppend( strPathFilename, strMessage + "\n" );
 #ifdef MTA_DEBUG
@@ -733,11 +859,7 @@ void SharedUtil::BeginEventLog( void )
     if ( GetApplicationSettingInt(  "no-cycle-event-log" ) == 0 )
     {
         SetApplicationSettingInt( "no-cycle-event-log", 1 );
-        SString strPathFilename = CalcMTASAPath( PathJoin( "mta", "logfile.txt" ) );
-        SString strPathFilenamePrev = CalcMTASAPath( PathJoin( "mta", "logfile_old.txt" ) );
-        FileDelete( strPathFilenamePrev );
-        FileRename( strPathFilename, strPathFilenamePrev );
-        FileDelete( strPathFilename );
+        CycleFile( CalcMTASAPath( PathJoin( "mta", "logs", "logfile.txt" ) ), 1 );
     }
     WriteDebugEvent( "BeginEventLog" );
 }
@@ -780,7 +902,6 @@ SString SharedUtil::GetSystemErrorMessage ( uint uiError, bool bRemoveNewlines, 
 }
 
 
-#endif
 
 
 #ifdef ExpandEnvironmentStringsForUser
@@ -876,9 +997,56 @@ bool SharedUtil::ShellExecuteNonBlocking ( const SString& strAction, const SStri
     return MyShellExecute ( false, strAction, strFile, strParameters, strDirectory );
 }
 
-
 #endif  // MTA_CLIENT
 
+#ifdef WIN32
+#define _WIN32_WINNT_WIN8                   0x0602
+///////////////////////////////////////////////////////////////////////////
+//
+// SharedUtil::IsWindowsVersionOrGreater
+//
+// From Windows Kits\8.1 VersionHelpers.h
+// (Ignores compatibility mode)
+//
+///////////////////////////////////////////////////////////////////////////
+bool SharedUtil::IsWindowsVersionOrGreater(WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor)
+{
+    OSVERSIONINFOEXW osvi = { sizeof(osvi), 0, 0, 0, 0, {0}, 0, 0 };
+    DWORDLONG        const dwlConditionMask = VerSetConditionMask(
+        VerSetConditionMask(
+        VerSetConditionMask(
+            0, VER_MAJORVERSION, VER_GREATER_EQUAL),
+               VER_MINORVERSION, VER_GREATER_EQUAL),
+               VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL);
+
+    osvi.dwMajorVersion = wMajorVersion;
+    osvi.dwMinorVersion = wMinorVersion;
+    osvi.wServicePackMajor = wServicePackMajor;
+
+    return VerifyVersionInfoW(&osvi, VER_MAJORVERSION | 
+      VER_MINORVERSION | VER_SERVICEPACKMAJOR, dwlConditionMask) != FALSE;
+}
+
+bool SharedUtil::IsWindowsXPSP3OrGreater()
+{
+    return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_WINXP), LOBYTE(_WIN32_WINNT_WINXP), 3);
+}
+
+bool SharedUtil::IsWindowsVistaOrGreater()
+{
+    return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_VISTA), LOBYTE(_WIN32_WINNT_VISTA), 0);
+}
+
+bool SharedUtil::IsWindows7OrGreater()
+{
+    return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_WIN7), LOBYTE(_WIN32_WINNT_WIN7), 0);
+}
+
+bool SharedUtil::IsWindows8OrGreater()
+{
+    return IsWindowsVersionOrGreater(HIBYTE(_WIN32_WINNT_WIN8), LOBYTE(_WIN32_WINNT_WIN8), 0);
+}
+#endif  // WIN32
 
 static uchar ToHexChar ( uchar c )
 {
@@ -1006,13 +1174,51 @@ void SharedUtil::RandomizeRandomSeed ( void )
 
 //
 // Return true if currently executing the main thread.
-// Main thread being defined as the thread the function is first called from.
+// (Linux: Main thread being defined as the thread the function is first called from.)
 //
 bool SharedUtil::IsMainThread ( void )
 {
 #ifdef WIN32
-    static DWORD dwMainThread = GetCurrentThreadId ();
-    return GetCurrentThreadId () == dwMainThread;
+    static DWORD dwMainThreadID = 0;
+    if ( dwMainThreadID == 0 )
+    {
+        // Find oldest thread in the current process ( http://www.codeproject.com/Questions/78801/How-to-get-the-main-thread-ID-of-a-process-known-b )
+        HANDLE hThreadSnap = CreateToolhelp32Snapshot( TH32CS_SNAPTHREAD, 0 );
+        if ( hThreadSnap != INVALID_HANDLE_VALUE )
+        {
+            ULONGLONG ullMinCreateTime = ULLONG_MAX;
+            THREADENTRY32 th32;
+            th32.dwSize = sizeof(THREADENTRY32);
+            for ( BOOL bOK = Thread32First( hThreadSnap, &th32 ); bOK; bOK = Thread32Next( hThreadSnap, &th32 ) )
+            {
+                if ( th32.th32OwnerProcessID == GetCurrentProcessId() )
+                {
+                    HANDLE hThread = OpenThread( THREAD_QUERY_INFORMATION,TRUE, th32.th32ThreadID );
+                    if ( hThread )
+                    {
+                        FILETIME afTimes[4] = { 0 };
+                        if ( GetThreadTimes( hThread, &afTimes[0], &afTimes[1], &afTimes[2], &afTimes[3] ) )
+                        {
+                            ULONGLONG ullTest = ( ULONGLONG(afTimes[0].dwHighDateTime) << 32 ) + afTimes[0].dwLowDateTime;
+                            if ( ullTest && ullTest < ullMinCreateTime )
+                            {
+                                ullMinCreateTime = ullTest;
+                                dwMainThreadID = th32.th32ThreadID;
+                            }
+                        }
+                        CloseHandle( hThread );
+                    }
+                }
+            }
+            CloseHandle( hThreadSnap );
+        }
+
+        // Fallback
+        if ( dwMainThreadID == 0 )
+            dwMainThreadID = GetCurrentThreadId();
+    }
+
+    return dwMainThreadID == GetCurrentThreadId();
 #else
     static pthread_t dwMainThread = pthread_self ();
     return pthread_equal ( pthread_self (), dwMainThread ) != 0;
@@ -1212,8 +1418,8 @@ bool SharedUtil::IsLuaCompiledScript( const void* pData, uint uiLength )
     return ( uiLength > 0 && pCharData[0] == 0x1B );    // Do the same check as what the Lua parser does
 }
 
-// Check for encypted script
-bool SharedUtil::IsLuaEncryptedScript( const void* pData, uint uiLength )
+// Check for obfuscated script
+bool SharedUtil::IsLuaObfuscatedScript( const void* pData, uint uiLength )
 {
     const uchar* pCharData = (const uchar*)pData;
     return ( uiLength > 0 && pCharData[0] == 0x1C );    // Look for our special marker
@@ -1226,7 +1432,7 @@ bool SharedUtil::IsLuaEncryptedScript( const void* pData, uint uiLength )
 bool SharedUtil::IsValidVersionString ( const SString& strVersion )
 {
     const SString strCheck = "0.0.0-0.00000.0.000";
-    uint uiLength = Min ( strCheck.length (), strVersion.length () );
+    uint uiLength = std::min ( strCheck.length (), strVersion.length () );
     for ( unsigned int i = 0 ; i < uiLength ; i++ )
     {
         uchar c = strVersion[i];
@@ -1242,17 +1448,6 @@ bool SharedUtil::IsValidVersionString ( const SString& strVersion )
 SString SharedUtil::ExtractVersionStringBuildNumber( const SString& strVersion )
 {
     return strVersion.SubStr( 8, 5 );
-}
-
-
-// Replace major/minor/type to match current configuration
-SString SharedUtil::ConformVersionStringToBaseVersion( const SString& strVersion, const SString& strBaseVersion )
-{
-    SString strResult = strVersion;
-    strResult[0] = strBaseVersion[0];  // Major
-    strResult[2] = strBaseVersion[2];  // Minor
-    strResult[6] = strBaseVersion[6];  // Type
-    return strResult;
 }
 
 
@@ -1510,26 +1705,28 @@ namespace SharedUtil
 #endif
         if ( dwProcessorNumber == (DWORD)-1 )
         {
-            LOCAL_FUNCTION_START
-                static DWORD GetCurrentProcessorNumberXP(void)
-                {
+            auto GetCurrentProcessorNumberXP = []() -> int
+            {
 #ifdef WIN32
     #ifdef WIN_x64
                     return 0;
     #else
                     // This should work on XP
-                    _asm {mov eax, 1}
-                    _asm {cpuid}
-                    _asm {shr ebx, 24}
-                    _asm {mov eax, ebx}
+                    _asm
+                    {
+                        mov eax, 1
+                        cpuid
+                        shr ebx, 24
+                        mov eax, ebx
+                    }
     #endif
 #else
                     // This should work on Linux
                     return sched_getcpu();
 #endif
-                }
-            LOCAL_FUNCTION_END
-            dwProcessorNumber = LOCAL_FUNCTION::GetCurrentProcessorNumberXP();
+            };
+            
+            dwProcessorNumber = GetCurrentProcessorNumberXP();
         }
         return dwProcessorNumber;
     }
@@ -1768,5 +1965,5 @@ MTAEXPORT void GetLibMtaVersion( char* pBuffer, uint uiMaxSize )
                             ,0
                             );
     uint uiLengthInclTerm = strVersion.length() + 1;
-    STRNCPY( pBuffer, *strVersion, Max( uiLengthInclTerm, uiMaxSize ) );
+    STRNCPY( pBuffer, *strVersion, std::max( uiLengthInclTerm, uiMaxSize ) );
 }

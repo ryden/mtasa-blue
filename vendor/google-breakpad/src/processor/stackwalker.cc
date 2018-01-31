@@ -41,7 +41,7 @@
 #include "google_breakpad/processor/call_stack.h"
 #include "google_breakpad/processor/code_module.h"
 #include "google_breakpad/processor/code_modules.h"
-#include "google_breakpad/processor/minidump.h"
+#include "google_breakpad/processor/dump_context.h"
 #include "google_breakpad/processor/stack_frame.h"
 #include "google_breakpad/processor/stack_frame_symbolizer.h"
 #include "google_breakpad/processor/system_info.h"
@@ -58,7 +58,7 @@
 
 namespace google_breakpad {
 
-const int Stackwalker::kRASearchWords = 30;
+const int Stackwalker::kRASearchWords = 40;
 
 uint32_t Stackwalker::max_frames_ = 1024;
 bool Stackwalker::max_frames_set_ = false;
@@ -190,7 +190,7 @@ bool Stackwalker::Walk(
 // static
 Stackwalker* Stackwalker::StackwalkerForCPU(
     const SystemInfo* system_info,
-    MinidumpContext* context,
+    DumpContext* context,
     MemoryRegion* memory,
     const CodeModules* modules,
     StackFrameSymbolizer* frame_symbolizer) {
@@ -234,6 +234,7 @@ Stackwalker* Stackwalker::StackwalkerForCPU(
       break;
  
     case MD_CONTEXT_MIPS:
+    case MD_CONTEXT_MIPS64:
       cpu_stackwalker = new StackwalkerMIPS(system_info,
                                             context->GetContextMIPS(),
                                             memory, modules, frame_symbolizer);

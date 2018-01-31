@@ -9,19 +9,14 @@
 *  Multi Theft Auto is available from http://www.multitheftauto.com/
 *
 *****************************************************************************/
+#pragma once
 
 #if WITH_ALLOC_TRACKING
     #define CHashMap CMap
 #else
 
-#if defined(WIN32)
-    #include <hash_map>
-    #define HASH_MAP_TYPE stdext::hash_map
-#elif defined(__GNUC__) && (__GNUC__ >= 3)
-    #include <ext/hash_map>
-    #define HASH_MAP_TYPE __gnu_cxx::hash_map
-#endif
-
+#include <unordered_map>
+#include <functional>
 
 namespace SharedUtil
 {
@@ -30,12 +25,8 @@ namespace SharedUtil
     //
     // Using hash_map
     //
-    template < class K, class V >
-    class CHashMap : public HASH_MAP_TYPE < K, V >
-    {
-    public:
-    };
-
+	template < class K, class V >
+	using CHashMap = std::unordered_map < K, V >;
 
     ////////////////////////////////////////////////
     //
@@ -109,36 +100,16 @@ namespace SharedUtil
 
 
 // Calculate a hash value for SString
-#if defined(WIN32)
-    #if _MSC_VER <= 1500
-        inline size_t hash_value ( const SString& strString )
-        {
-            const char *_Ptr = strString.c_str ();
-            return ( stdext::_Hash_value ( _Ptr, _Ptr + strString.size () ) );
-        }
-
-    #else
-        #include <functional>
-        inline size_t hash_value(const SString& strString)
-        {
-            std::hash<std::string> hashFunction;
-            return hashFunction( strString );
-        }    
-    #endif
-#elif defined(__GNUC__) && (__GNUC__ >= 3)
-
-    namespace __gnu_cxx
+namespace std 
+{
+    template<>
+    struct hash<SString>
     {
-        template<>
-        struct hash < SString >
+        size_t operator()(const SString& str) const
         {
-            size_t operator () ( const SString& strString ) const
-            {
-                return __stl_hash_string ( strString );
-            }
-        };
-    }
-
-#endif
+            return std::hash<std::string>()(str);
+        }
+    };
+}
 
 #endif  // WITH_ALLOC_TRACKING
